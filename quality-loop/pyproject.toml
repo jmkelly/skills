@@ -1,0 +1,12 @@
+[project]
+name = "quality-loop-skill"
+version = "0.1.0"
+license = "MIT"
+description = "Deterministic quality gates (CRAP, radon metrics) and the two-agent fix loop for .NET and Python repos"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "codemetrics": {
+    "rules": {
+      "cyclomatic": ["error", { "max": 25 }],
+      "cognitive":  ["error", { "max": 30 }],
+      "nesting":    ["error", { "max": 5 }],
+      "lcom4":      ["error", { "max": 4 }],
+      "coupling":   ["error", { "max": 20 }],
+      "mi":         ["error", { "min": 20 }]
+    },
+    "failOn": { "severity": "high" },
+    "exclude": ["**/Migrations/**", "**/*.Tests/**", "**/obj/**", "**/bin/**"]
+  }
+}
