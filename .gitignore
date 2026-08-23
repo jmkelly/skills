@@ -1,0 +1,3 @@
+# System-provided skills (symlinks into /usr/share/omarchy), not part of this repo
+diagnose-crash
+omarchy
