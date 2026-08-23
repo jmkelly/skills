@@ -1,13 +1,3 @@
----
-name: readme
-description: >
-  Repository documentation for the skills collection installed at ~/.pi/agent/skills.
-  Lists the quality-loop and writing-for-agents skills with their purpose and licenses.
-  Documentation only, not an operational skill; kept out of the model's context.
-  Ignore this entry unless reading repository documentation.
-disable-model-invocation: true
----
-
 # skills
 
 Agent skills for the [pi](https://github.com/badlogic/pi) LLM harness, as installed at `~/.pi/agent/skills`.
