@@ -5,26 +5,34 @@ Detects the repo stack (.NET or Python) and runs the matching deterministic
 gates:
 
   .NET:
-    quality  scripts/dotnet/audit.py                         gate CRAP < 10       -> crap-queue.md
-    metrics  scripts/dotnet/metrics-audit.py                 gate .dependably     -> metrics-queue.md
-    stryker  scripts/dotnet/stryker-audit.py                 gate thresholds.break -> stryker-queue.md
+    quality   scripts/dotnet/audit.py                     gate CRAP < 10            -> crap-queue.md
+    coverage  scripts/dotnet/coverage-audit.py             gate authored branch >= floor -> coverage-queue.md
+    metrics   scripts/dotnet/metrics-audit.py             gate .dependably          -> metrics-queue.md
+    warnings  scripts/dotnet/warnings-audit.py            gate zero build warnings  -> warnings-queue.md
+    stryker   scripts/dotnet/stryker-audit.py             gate thresholds.break     -> stryker-queue.md
 
 All .NET audits are skill-local and repo-agnostic (repo/solution/test-project
 discovery); repos carry only *policy* files: a `.dependably` at the repo root
-(rules/excludes/exceptions) and/or a `stryker-config.json` in the test project
-(project under test, thresholds). See SKILL.md for the bundled default configs.
+(rules/excludes/exceptions), a `stryker-config.json` in the test project
+(project under test, thresholds), a `coverage-policy.json` at the repo root
+(branch floor / queue size), and project-level `<NoWarn>` entries
+(warning suppression). See SKILL.md for the bundled default configs.
 
   Python:
-    quality  scripts/python/audit.py                         gate CRAP < 10       -> crap-queue.md
-    metrics  scripts/python/metrics-audit.py                 gate radon rules     -> metrics-queue.md
-                                                             (mutation testing / Stryker: not yet available for Python)
+    quality   scripts/python/audit.py                     gate CRAP < 10       -> crap-queue.md
+    metrics   scripts/python/metrics-audit.py             gate radon rules     -> metrics-queue.md
+    warnings  scripts/python/warnings-audit.py            gate zero pyflakes findings -> warnings-queue.md
+                                                          (mutation testing / Stryker: not yet available for Python)
 
 Each iteration:
-  1. VERIFIER (deterministic): cheap gates first — quality (CRAP), then
-     metrics. Stryker (mutation testing, ~11 min full run) only runs in
-     iterations where BOTH quality and metrics pass, so an iteration never
-     pays the Stryker cost while a cheaper gate is already failing. Each
-     audit gates on its own rules and writes its own work queue.
+  1. VERIFIER (deterministic): cheap gates first — quality (CRAP, also
+     regenerates the coverage data), then coverage (parses the fresh
+     cobertura file, no extra test run), then metrics, then warnings
+     (non-incremental .NET build / pyflakes scan).
+     Stryker (mutation testing, ~11 min full run) only runs in
+     iterations where quality, metrics AND warnings pass, so an iteration
+     never pays the Stryker cost while a cheaper gate is already failing.
+     Each audit gates on its own rules and writes its own work queue.
   2. If any gate failed: IMPLEMENTOR — a headless pi session fixes the worst
      `batch-size` offenders across the failing queues. **Each pass starts a
      fresh session**; past session files accumulate in the session dir for
@@ -92,9 +100,9 @@ REPO = find_repo()
 LOOP_DIR = Path(__file__).resolve().parent
 HANDOFF_FILE = "implementor-summary.txt"
 
-DOTNET_DATA_FILES = "crap-report.json / metrics-report.json / StrykerOutput/<latest>/reports/mutation-report.json"
+DOTNET_DATA_FILES = "crap-report.json / coverage-report.json / metrics-report.json / warnings-report.json / StrykerOutput/<latest>/reports/mutation-report.json"
 DOTNET_TEST_CMD = "run the full test suite (dotnet test; Testcontainers needs Docker)"
-PYTHON_DATA_FILES = "crap-report.json / metrics-report.json"
+PYTHON_DATA_FILES = "crap-report.json / metrics-report.json / warnings-report.json"
 PYTHON_TEST_CMD = "run the full test suite (pytest)"
 
 DOTNET_GUIDANCE = {
@@ -103,6 +111,12 @@ DOTNET_GUIDANCE = {
         "services) as the primary lever; add REAL unit tests only when that is the cheap "
         "lever for low-complexity untested methods. Never add ExcludeFromCodeCoverage, "
         "pragmas, or fake tests."
+    ),
+    "coverage": (
+        "coverage-queue.md: add REAL unit/integration tests for untested methods, most uncovered "
+        "lines first; mocks/smoke tests only where the method is I/O-bound. Generated code "
+        "(.cshtml, Migrations/, compiler-generated classes) is excluded automatically — never "
+        "game the denominator or add ExcludeFromCodeCoverage."
     ),
     "metrics": (
         "Metrics queue: raise Maintainability Index / lower cyclomatic, cognitive, nesting, coupling, LCOM4. "
@@ -113,6 +127,11 @@ DOTNET_GUIDANCE = {
         "Stryker queue: surviving mutants mean tests that don't detect faults — add or tighten the test that "
         "should kill each mutant (or refactor if the mutation exposes dead code). Mutants in untested CLI "
         "strings may indicate missing tests for that surface, not string tweaks."
+    ),
+    "warnings": (
+        "warnings-queue.md: fix the warning — remove the unused code, apply the analyzer's suggested API. "
+        "A *specific* csproj <NoWarn> entry with a documented reason is legitimate repo policy; blanket "
+        "NoWarn to dodge the gate is not (anti-gaming rules)."
     ),
 }
 
@@ -126,6 +145,10 @@ PYTHON_GUIDANCE = {
     "metrics": (
         "Metrics queue: raise Maintainability Index / lower cyclomatic complexity and "
         "parameter counts (radon). No per-file suppressions; refactor honestly."
+    ),
+    "warnings": (
+        "warnings-queue.md (pyflakes): remove the unused import/variable or define the missing name. "
+        "pyflakes has no suppression mechanism — fix, don't silence."
     ),
 }
 
@@ -184,17 +207,29 @@ def build_audits(stack: str) -> dict:
                 "CRAP < 10 for every method",
                 (),
             ),
+            "coverage": (
+                LOOP_DIR / "dotnet" / "coverage-audit.py",
+                "coverage-queue.md",
+                "authored branch coverage >= coverage-policy.json floor (default 70%)",
+                ("quality",),
+            ),
             "metrics": (
                 LOOP_DIR / "dotnet" / "metrics-audit.py",
                 "metrics-queue.md",
                 ".dependably metric rules (MI >= 20, cyclomatic <= 25, ...)",
                 (),
             ),
+            "warnings": (
+                LOOP_DIR / "dotnet" / "warnings-audit.py",
+                "warnings-queue.md",
+                "zero build warnings (dotnet build --no-incremental)",
+                (),
+            ),
             "stryker": (
                 LOOP_DIR / "dotnet" / "stryker-audit.py",
                 "stryker-queue.md",
                 "mutation score >= thresholds.break",
-                ("quality", "metrics"),
+                ("quality", "metrics", "warnings"),
             ),
         }
     return {  # python
@@ -208,6 +243,12 @@ def build_audits(stack: str) -> dict:
             LOOP_DIR / "python" / "metrics-audit.py",
             "metrics-queue.md",
             "radon rules (MI >= 20, cyclomatic <= 25, args <= 7)",
+            (),
+        ),
+        "warnings": (
+            LOOP_DIR / "python" / "warnings-audit.py",
+            "warnings-queue.md",
+            "zero pyflakes findings",
             (),
         ),
     }
@@ -325,6 +366,10 @@ def print_dry_run(brief: str) -> None:
     print("    " + brief.replace(chr(10), chr(10) + "    "))
 
 
+def queue_order_names(auds: dict) -> str:
+    return ", ".join(auds[name][1] for name in auds)
+
+
 def build_brief(config: ImplementorConfig, failed: list[str]) -> str:
     handoff = config.session_dir / HANDOFF_FILE
     previous = previous_handoff(handoff)
@@ -339,7 +384,7 @@ def build_brief(config: ImplementorConfig, failed: list[str]) -> str:
 1. Read each listed queue file in the project root (worst offenders first); full data lives next to each:
    {data_files}.
 2. Refactor the worst {config.batch} offenders this pass, worst-first across the failing queues in this order:
-   {'crap-queue.md, metrics-queue.md, stryker-queue.md' if config.stack == 'dotnet' else 'crap-queue.md, metrics-queue.md'}
+   {queue_order_names(config.auds)}
    (never skip a queue entirely if it has offenders and your batch isn't spent). This is a fresh
    session: previous passes' sessions (JSONL files) are in the session dir if you want to see what
    was already attempted, but the queues are regenerated by each audit and list only items still
@@ -496,7 +541,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("max_iterations", nargs="?", type=int, default=10, help="max loop iterations (default: 10)")
     parser.add_argument("batch_size", nargs="?", type=int, default=5, help="items per implementor pass (default: 5)")
     parser.add_argument(
-        "--skip", action="append", default=[], help="skip an audit (can be repeated): quality|metrics[|stryker]"
+        "--skip", action="append", default=[], help="skip an audit (can be repeated): quality|coverage|metrics|warnings[|stryker]"
     )
     parser.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip pi")
     return parser.parse_args()

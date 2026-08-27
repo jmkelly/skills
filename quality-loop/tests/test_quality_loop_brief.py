@@ -6,7 +6,6 @@ command construction / launch path (model and approve flags, dry-run).
 """
 from __future__ import annotations
 
-from argparse import Namespace
 from pathlib import Path
 import re
 
@@ -80,6 +79,9 @@ def test_queue_links():
 def test_guidance_lines():
     lines = ql.guidance_lines(["quality"], ql.PYTHON_GUIDANCE)
     assert len(lines) == 1 and lines[0].startswith("- crap-queue.md:")
+    assert "warnings" in ql.PYTHON_GUIDANCE and "warnings" in ql.DOTNET_GUIDANCE
+    assert "NoWarn" in ql.DOTNET_GUIDANCE["warnings"]
+    assert "pyflakes" in ql.PYTHON_GUIDANCE["warnings"]
 
 
 def test_guidance_for_python():
@@ -104,12 +106,13 @@ def test_build_brief_python_role_and_guidance(tmp_path):
 
 
 def test_build_brief_python_queues_and_batch(tmp_path):
-    brief = ql.build_brief(make_config(tmp_path), ["quality", "metrics"])
+    brief = ql.build_brief(make_config(tmp_path), ["quality", "metrics", "warnings"])
     assert "- crap-queue.md (failing gate:" in brief
     assert "- metrics-queue.md (failing gate:" in brief
-    assert "crap-report.json / metrics-report.json" in brief
+    assert "- warnings-queue.md (failing gate:" in brief
+    assert "crap-report.json / metrics-report.json / warnings-report.json" in brief
     assert "Refactor the worst 2 offenders this pass" in brief
-    assert "crap-queue.md, metrics-queue.md" in brief
+    assert "crap-queue.md, metrics-queue.md, warnings-queue.md" in brief
 
 
 def test_build_brief_python_handoff_and_summary_path(tmp_path):
@@ -131,10 +134,11 @@ def test_build_brief_includes_handoff(tmp_path):
 
 def test_build_brief_dotnet_batch_order(tmp_path):
     config = make_config(tmp_path, stack="dotnet", auds=ql.build_audits("dotnet"))
-    brief = ql.build_brief(config, ["quality", "stryker"])
-    assert "crap-queue.md, metrics-queue.md, stryker-queue.md" in brief
+    brief = ql.build_brief(config, ["quality", "warnings", "stryker"])
+    assert "crap-queue.md, metrics-queue.md, warnings-queue.md, stryker-queue.md" in brief
     assert "Stryker queue:" in brief
     assert "ExcludeFromCodeCoverage" in brief
+    assert "NoWarn" in brief
 
 
 # ------------------------------------------------------------- pi plumbing

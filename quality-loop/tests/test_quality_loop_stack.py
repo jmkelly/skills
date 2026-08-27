@@ -93,9 +93,10 @@ def test_build_audits_dotnet_order_and_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(ql, "REPO", tmp_path)
     monkeypatch.setattr(ql, "LOOP_DIR", tmp_path)
     auds = ql.build_audits("dotnet")
-    assert list(auds) == ["quality", "metrics", "stryker"]
+    assert list(auds) == ["quality", "metrics", "warnings", "stryker"]
     assert auds["quality"][0] == tmp_path / "dotnet" / "audit.py"
     assert auds["metrics"][0] == tmp_path / "dotnet" / "metrics-audit.py"
+    assert auds["warnings"][0] == tmp_path / "dotnet" / "warnings-audit.py"
     assert auds["stryker"][0] == tmp_path / "dotnet" / "stryker-audit.py"
 
 
@@ -103,17 +104,20 @@ def test_build_audits_dotnet_prerequisites(tmp_path, monkeypatch):
     monkeypatch.setattr(ql, "REPO", tmp_path)
     monkeypatch.setattr(ql, "LOOP_DIR", tmp_path)
     auds = ql.build_audits("dotnet")
-    assert auds["stryker"][3] == ("quality", "metrics")
+    assert auds["stryker"][3] == ("quality", "metrics", "warnings")
     assert auds["quality"][3] == ()
+    assert auds["warnings"][3] == ()
 
 
 def test_build_audits_python(tmp_path, monkeypatch):
     monkeypatch.setattr(ql, "LOOP_DIR", tmp_path)
     auds = ql.build_audits("python")
-    assert list(auds) == ["quality", "metrics"]
+    assert list(auds) == ["quality", "metrics", "warnings"]
     assert auds["quality"][0] == tmp_path / "python" / "audit.py"
     assert auds["quality"][1] == "crap-queue.md"
     assert auds["metrics"][2] == "radon rules (MI >= 20, cyclomatic <= 25, args <= 7)"
+    assert auds["warnings"][0] == tmp_path / "python" / "warnings-audit.py"
+    assert auds["warnings"][1] == "warnings-queue.md"
 
 
 # ------------------------------------------------------------ skip handling

@@ -7,6 +7,8 @@ metrics-report.json
 metrics-queue.md
 stryker-report.json
 stryker-queue.md
+warnings-report.json
+warnings-queue.md
 
 # Python caches
 __pycache__/

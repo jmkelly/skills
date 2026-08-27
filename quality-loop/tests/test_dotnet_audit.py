@@ -272,7 +272,7 @@ def test_row_for(monkeypatch, tmp_path):
     method = sample_methods(tmp_path)[0]
     method["coverage"] = 50.0
     row = da.row_for(method)
-    assert row == ["11", "3", "50%", "Core.Bad", f"Core/Bad.cs:5"]
+    assert row == ["11", "3", "50%", "Core.Bad", "Core/Bad.cs:5"]
 
 
 def test_queue_rows_and_lines():

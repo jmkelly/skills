@@ -33,6 +33,8 @@ METRICS_AUDIT = _load_module("quality_loop_skill.metrics_audit", REPO_ROOT / "sc
 QUALITY_LOOP = _load_module("quality_loop_skill.quality_loop", REPO_ROOT / "scripts" / "quality-loop.py")
 DOTNET_METRICS = _load_module("quality_loop_skill.dotnet_metrics_audit", REPO_ROOT / "scripts" / "dotnet" / "metrics-audit.py")
 DOTNET_STRYKER = _load_module("quality_loop_skill.dotnet_stryker_audit", REPO_ROOT / "scripts" / "dotnet" / "stryker-audit.py")
+DOTNET_WARNINGS = _load_module("quality_loop_skill.dotnet_warnings_audit", REPO_ROOT / "scripts" / "dotnet" / "warnings-audit.py")
+PY_WARNINGS = _load_module("quality_loop_skill.py_warnings_audit", REPO_ROOT / "scripts" / "python" / "warnings-audit.py")
 
 
 def fake_proc(returncode: int = 0, stdout: str = "out\n", stderr: str = "err\n") -> subprocess.CompletedProcess:
