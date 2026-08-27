@@ -20,10 +20,13 @@ is done only when every gate is **green** (the audit exits 0, the queue empty).
 | Stack | Gate | Tool | Gate rule | Queue written |
 |---|---|---|---|---|
 | .NET | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method (test project excluded) | `crap-queue.md` |
+| .NET | coverage | `coverage-audit.py` (coverlet cobertura over authored code only) | **authored branch coverage ≥ floor** (`coverage-policy.json`, default 70%) | `coverage-queue.md` |
 | .NET | metrics | `Dependably.CodeMetrics` over Roslyn | `.dependably` rules (MI ≥ 20, cyclomatic ≤ 25, …) | `metrics-queue.md` |
+| .NET | warnings | `dotnet build --no-incremental` | **zero build warnings** (compiler/analyzer/NuGet/MSBuild) | `warnings-queue.md` |
 | .NET | mutation | `dotnet-stryker` | `thresholds.break` | `stryker-queue.md` |
 | Python | quality | radon cc × coverage.py per-function coverage (same CRAP formula) | **CRAP < 10** per function (tests/ excluded) | `crap-queue.md` |
 | Python | metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 25, args ≤ 7 | `metrics-queue.md` |
+| Python | warnings | `pyflakes` | **zero findings** (unused imports, undefined names) | `warnings-queue.md` |
 
 Python has no mutation-testing gate yet (dotnet-stryker has no Python equivalent in
 this skill); the loop driver simply doesn't offer `--skip stryker` for Python repos.
@@ -34,11 +37,12 @@ this skill); the loop driver simply doesn't offer `--skip stryker` for Python re
 python3 scripts/quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run]
 ```
 
-- Runs the detected stack's quality + metrics every iteration (cheap gates first); for
-  .NET, Stryker only in iterations where both of those are green, so a session never
-  pays ~11 min while a cheaper gate is red.
+- Runs the detected stack's quality, coverage, metrics, and warnings every iteration (cheap gates
+  first; for .NET, coverage reuses the quality audit's fresh cobertura file); Stryker only in
+  iterations where all of those are green, so a session never pays ~11 min while a cheaper gate
+  is red.
 - `--skip` validates against the detected stack (e.g. `--skip stryker` on a Python repo
-  is an error: `available: quality, metrics`).
+  is an error: `available: quality, metrics, warnings`).
 - Each failing iteration sends a headless implementor (`pi -p`, fresh session per pass)
   to fix the worst offenders; a one-paragraph handoff file carries context between
   passes. The session dir is unique per loop run (repo slug + start timestamp under
@@ -88,6 +92,31 @@ jq -r '.methods[] | select(.crap >= 10)
        | @tsv' crap-report.json | sort -rn | column -t -s$'\t'
 ```
 
+### Coverage audit (.NET) — `scripts/dotnet/coverage-audit.py`
+
+```bash
+python3 scripts/dotnet/coverage-audit.py [--coverage <cobertura.xml>] [--skip-tests] [--no-gate]
+```
+
+Gates on **branch coverage of authored code only**. Generated code is excluded
+with hard-coded heuristics (no config, nothing to game): Razor/views
+(`.cshtml`), EF migrations (`Migrations/` incl. `*.Designer.cs` and
+`*ModelSnapshot.cs`), C#-compiler-generated classes (async state machines,
+lambdas — names containing `<`), and `obj/` build output. The queue lists
+untested authored methods worst-first (most uncovered lines, then
+complexity) — the loop's implementor raises coverage by adding real tests.
+
+Repo policy: `coverage-policy.json` at the repo root — `{"branchFloor": 75,
+"queueLimit": 30}` (without one: defaults 70 / 30). Writes
+`coverage-report.json` (per-project and per excluded-category stats),
+`coverage-queue.md`, and appends a trend row to `coverage-history.csv`.
+
+The coverage data comes from the newest
+`artifacts/test-results/coverage.cobertura.xml` — the quality (CRAP) audit
+regenerates it in the same loop iteration, so the loop runs coverage right
+after quality at no extra test cost. Standalone, it reuses the newest file
+when present and otherwise runs `dotnet test` itself.
+
 ### Metrics audit — `scripts/dotnet/metrics-audit.py` (via repo) or `scripts/python/metrics-audit.py`
 
 - **.NET metrics**: `scripts/dotnet/metrics-audit.py` is a skill-local, repo-agnostic
@@ -107,10 +136,33 @@ jq -r '.methods[] | select(.crap >= 10)
   `.dependably` rules by name and threshold; writes `metrics-report.json` +
   `metrics-queue.md` in the same shape.
 
+### Warnings audit (both stacks) — `scripts/dotnet/warnings-audit.py` or `scripts/python/warnings-audit.py`
+
+```bash
+python3 scripts/dotnet/warnings-audit.py    # dotnet build --no-incremental, parses every ': warning <code>:' line
+python3 scripts/python/warnings-audit.py    # pyflakes over every .py file
+```
+
+- **.NET**: builds the whole solution **non-incrementally** (`--no-incremental`, so
+  up-to-date projects can't hide warnings) with `DOTNET_CLI_UI_LANGUAGE=en` (localized
+  SDKs parse identically). Gates on every warning class: compiler (CS), analyzers
+  (CA/IDExxxx/custom), NuGet (NU), MSBuild (MSB). Exit 0 = clean build, 1 = warnings
+  remain, 2 = build failed (a broken build is not a warnings outcome — the CRAP audit's
+  `dotnet test` reports it as a hard error too). ~10 s–2 min depending on solution size.
+- **Python**: `pyflakes` over all `.py` files (same walk/skipped dirs as the CRAP audit;
+  needs `pip install pyflakes`). Deliberately config-free: no rule file, no suppression
+  — the fix is removing the unused import/variable or defining the missing name.
+- Both write `warnings-report.json` + `warnings-queue.md` in the same schema shape as
+  the other audits. Suppression is repo policy: a **specific** `<NoWarn>` entry in a
+  csproj with a documented reason; blanket `NoWarn` to dodge the gate is rejected.
+
 ## Anti-gaming rules (enforce in reviews)
 
 - No `[ExcludeFromCodeCoverage]`, `#pragma warning disable`, `# pragma: no cover`, or
   `Debug.Assert`/no-op "tests" to fake coverage.
+- No blanket `<NoWarn>` (whole categories or code ranges) to clear the warnings gate; a
+  *specific* `<NoWarn>$(NoWarn);CS0219</NoWarn>` entry with a documented reason is
+  legitimate repo policy — the gate's intended suppression mechanism.
 - Behavior must be preserved: no swallowed exceptions, removed validation, or weakened
   checks to shed branches.
 - Coverage may legitimately rise via real unit/integration tests, but the primary lever
@@ -126,9 +178,18 @@ jq -r '.methods[] | select(.crap >= 10)
 - **.NET**: `crap4dotnet` is a global tool targeting net8 while installed runtimes are
   9/10, so `scripts/dotnet/audit.py` sets `DOTNET_ROLL_FORWARD=LatestMajor`; the stryker
   audit does the same for its testhost.
+- **.NET**: the warnings audit builds `--no-incremental` and pins `DOTNET_CLI_UI_LANGUAGE=en`,
+  so results don't depend on incremental-build state or the SDK's locale. NuGet audit
+  warnings (NUxxxx, e.g. NU1901) follow feed advisory data and can change over time — the
+  one non-byte-deterministic class; treat via `<NoWarn>` policy if they are noise.
 - **.NET**: `Program.<Main>$` entries are the compiler-merged top-level statements of
   `Program.cs`. Fix by moving the statements into named static methods/classes (e.g., a
   `Cli` class with `RunAsync`), not by renaming.
+- **.NET**: the coverage audit measures authored code only; its branch floor is
+  deliberately not a raw-% gate on the full assembly, so excluding generated code
+  cannot inflate it — the exclusions are hard-coded in the audit. `--skip quality`
+  while running coverage reuses whatever coverage file exists (stale), which is fine
+  for experiments but not for a gate decision.
 - **.NET**: `COVERAGE_STALE` warnings (Razor-generated entries, ~71% unmatched) are known
   noise: coverage is matched by PDB sequence points; trust the per-method numbers in the
   JSON, not the warning.
@@ -137,4 +198,4 @@ jq -r '.methods[] | select(.crap >= 10)
   lines don't count against it.
 - **Python**: MI is module-level — that is how radon computes it; per-function slices
   are unreliable (radon 6 zeroes Halstead volume on calls/`with`). Pin the Python tools:
-  `radon`, `coverage`, plus the project's test runner (e.g. `pytest`).
+  `radon`, `coverage`, `pyflakes`, plus the project's test runner (e.g. `pytest`).

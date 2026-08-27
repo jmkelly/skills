@@ -1,7 +1,7 @@
 # quality-loop-skill
 
 Deterministic quality gates for **.NET** and **Python** repositories — CRAP < 10,
-metrics (radon / Dependably.CodeMetrics), Stryker mutation testing — plus a
+metrics (radon / Dependably.CodeMetrics), zero build warnings, Stryker mutation testing — plus a
 two-agent loop that drives the gates green. Distributed as a skill for the
 **pi** LLM harness, but every script runs standalone from the CLI.
 
@@ -34,7 +34,7 @@ machine-checkable gates** that both CI and coding agents can act on:
 | Concept | What it is |
 |---|---|
 | Gate | An audit script + a rule (e.g. "CRAP < 10 per method"). Exits 0 when green, 1 when red. |
-| Queue | `crap-queue.md` / `metrics-queue.md` / `stryker-queue.md` written to the repo root — offenders, worst first, with `file:line`. |
+| Queue | `crap-queue.md` / `metrics-queue.md` / `warnings-queue.md` / `stryker-queue.md` written to the repo root — offenders, worst first, with `file:line`. |
 | Loop | Runs cheap gates before expensive ones, hands the worst offenders to a headless implementor (`pi -p`, fresh session per pass), re-audits, repeats until every gate exits 0. |
 
 A gate is **red** while its queue lists offenders; the loop finishes only when
@@ -52,6 +52,7 @@ Full semantics, exit codes, anti-gaming rules, and known-tooling notes:
 |---|---|---|
 | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method, test project excluded |
 | metrics | `Dependably.CodeMetrics` (Roslyn) | `.dependably` rules: MI ≥ 20, cyclomatic ≤ 25, … |
+| warnings | `dotnet build --no-incremental` | **zero build warnings** (CS/analyzer/NU/MSB) |
 | mutation | `dotnet-stryker` | `thresholds.break` |
 
 **Setup** — `dotnet` plus three global tools:
@@ -64,9 +65,11 @@ dotnet tool install --global dotnet-stryker
 
 Plus the repo's test deps. All audit scripts are skill-local and
 repo-agnostic; the repo carries only *policy* files: `.dependably` at the repo
-root (rules/excludes/grandfathered exceptions — or the skill-bundled default)
-and `stryker-config.json` in the test project (project under test, thresholds;
-the audit generates a pinned default otherwise).
+root (rules/excludes/grandfathered exceptions — or the skill-bundled default),
+`stryker-config.json` in the test project (project under test, thresholds; the
+audit generates a pinned default otherwise), and project-level `<NoWarn>`
+entries (warning suppression — a specific code with a documented reason;
+blanket `NoWarn` is rejected).
 
 **Run** — CRAP audit (~1 min, includes `dotnet test`):
 
@@ -77,10 +80,11 @@ python3 scripts/dotnet/audit.py --include-tests # also gate the test project
 ```
 
 Metrics (~10 s) and mutation (~11 min — expensive, the loop only pays it when
-quality and metrics are already green):
+quality, metrics, and warnings are already green):
 
 ```bash
 python3 scripts/dotnet/metrics-audit.py
+python3 scripts/dotnet/warnings-audit.py   # non-incremental build, zero warnings
 python3 scripts/dotnet/stryker-audit.py
 ```
 
@@ -88,6 +92,10 @@ python3 scripts/dotnet/stryker-audit.py
 
 - `crap4dotnet` targets net8 while installed runtimes are 9/10; the audits set
   `DOTNET_ROLL_FORWARD=LatestMajor` for it and the stryker testhost.
+- The warnings audit builds with `--no-incremental` (up-to-date projects can't
+  hide warnings) and `DOTNET_CLI_UI_LANGUAGE=en` (localized SDKs parse
+  identically). NUxxxx NuGet-audit warnings follow feed advisory data, the one
+  non-byte-deterministic class — treat via `<NoWarn>` policy if they are noise.
 - `Program.<Main>$` entries are compiler-merged top-level statements of
   `Program.cs` — fix by moving statements into named static methods, not by
   renaming.
@@ -103,6 +111,7 @@ python3 scripts/dotnet/stryker-audit.py
 |---|---|---|
 | quality | radon cc × coverage.py (same CRAP formula, per-function) | **CRAP < 10** per function, `tests/` excluded |
 | metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 25, args ≤ 7 |
+| warnings | `pyflakes` | **zero findings** (unused imports, undefined names) |
 
 Python has **no mutation gate yet** (no Stryker equivalent in this skill) —
 the loop driver simply doesn't offer `--skip stryker` for Python repos.
@@ -110,7 +119,7 @@ the loop driver simply doesn't offer `--skip stryker` for Python repos.
 **Setup**
 
 ```bash
-pip install radon coverage        # plus the repo's test deps (e.g. pytest)
+pip install radon coverage pyflakes    # plus the repo's test deps (e.g. pytest)
 ```
 
 **Run** — CRAP audit (runs `coverage run -m pytest -q`):
@@ -125,6 +134,7 @@ Metrics:
 
 ```bash
 python3 scripts/python/metrics-audit.py         # mirrors the .dependably rules
+python3 scripts/python/warnings-audit.py        # pyflakes, zero findings
 ```
 
 Both write `crap-report.json` / `metrics-report.json` + queues in the same
@@ -138,8 +148,8 @@ schema/shape as the .NET audits — `jq` queries work unchanged across stacks
   it.
 - MI is module-level (that's how radon computes it); per-function slices are
   unreliable (radon 6 zeroes Halstead volume on calls/`with`). Pin tool
-  versions: `radon`, `coverage`, plus the test runner — the loop's determinism
-  depends on it.
+  versions: `radon`, `coverage`, `pyflakes`, plus the test runner — the loop's
+  determinism depends on it.
 
 ---
 
@@ -177,7 +187,7 @@ pip install -e .[dev]   # pytest
 pytest
 ```
 
-289 tests cover the audits' discovery, analysis, report schemas, and the loop
+310 tests cover the audits' discovery, analysis, report schemas, and the loop
 driver's stack detection and iteration logic.
 
 ## License

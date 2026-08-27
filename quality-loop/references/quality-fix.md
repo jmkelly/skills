@@ -6,12 +6,12 @@ green (every queue empty), honestly and without regressions.
 
 ## Inputs
 
-- `crap-queue.md` / `metrics-queue.md` / `stryker-queue.md` — offenders, worst first, with `file:line`
-- `crap-report.json` / `metrics-report.json` / `StrykerOutput/<latest>/reports/mutation-report.json` — full data behind the queues
+- `crap-queue.md` / `metrics-queue.md` / `warnings-queue.md` / `stryker-queue.md` — offenders, worst first, with `file:line`
+- `crap-report.json` / `metrics-report.json` / `warnings-report.json` / `StrykerOutput/<latest>/reports/mutation-report.json` — full data behind the queues
 - `AGENTS.md` — project conventions (DDD, thin controllers/pages, service extraction)
 
-Work worst-first **across all failing queues** (quality, then metrics, then stryker);
-the verifier does not send you away until every audit has run.
+Work worst-first **across all failing queues** (quality, then metrics, then warnings,
+then stryker); the verifier does not send you away until every audit has run.
 
 ## Procedure
 
@@ -25,10 +25,13 @@ the verifier does not send you away until every audit has run.
    - complexity 1–9 but coverage 0% → a real unit test is often cheaper than refactoring
 4. Refactor. Keep behavior identical. Follow AGENTS.md style (4-space indent, PascalCase,
    async/await, DI). Keep controllers/pages thin — move logic to services.
-5. Verify: build clean, then run targeted tests (.NET: `dotnet test --filter "FullyQualifiedName~..."`;
+5. Warnings queue items: fix the warning (delete unused code, apply the analyzer's
+   suggested API). A *specific* csproj `<NoWarn>` entry with a documented reason is
+   legitimate policy (the gate's suppression mechanism); a blanket one is not.
+6. Verify: build clean, then run targeted tests (.NET: `dotnet test --filter "FullyQualifiedName~..."`;
    Python: `pytest <file>::<test>`); before handing back, run the full test suite
    (.NET `dotnet test` needs Testcontainers/Docker up; Python `pytest`).
-6. Report: for each item you touched, one line — metric/queue, method, file:line, before → after
+7. Report: for each item you touched, one line — metric/queue, method, file:line, before → after
    (estimate), and what you did. Claiming a gate is green is the verifier's job; report what you changed.
 
 ## Anti-gaming rules
