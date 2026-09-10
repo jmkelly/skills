@@ -17,6 +17,8 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
+import xml.etree.ElementTree as ET
 from functools import lru_cache, partial
 from operator import itemgetter
 from pathlib import Path
@@ -49,13 +51,76 @@ QUEUE = REPO / "crap-queue.md"
 RESULTS_DIR = REPO / "artifacts" / "test-results"
 
 
+CSHARP_PROJECT_TYPE = "{9A19103F-16F7-4668-BE54-9A1E7A4F7556}"
+SLNX_TMP_SUFFIX = ".quality-loop-tmp.sln"
+
+
 def solution_path(repo: Path | None = None) -> Path:
-    """The repo's .sln — root files first, then the shallowest nested one."""
+    """The repo's solution — .slnx first (.NET 9+ XML format), then .sln.
+
+    Root files first, then the shallowest nested one. `dotnet build` and
+    `dotnet test` consume .slnx natively; the CRAP audit shims a .slnx to a
+    transient classic .sln for crap4dotnet (see slnx_to_sln).
+    """
     repo = repo or REPO
-    for cand in (*repo.glob("*.sln"),
-                 *sorted(repo.rglob("*.sln"), key=lambda p: (len(p.parts), str(p)))):
+    for cand in (*repo.glob("*.slnx"), *repo.glob("*.sln"),
+                 *sorted((*repo.rglob("*.slnx"), *repo.rglob("*.sln")),
+                         key=lambda p: (len(p.parts), str(p)))):
         return cand
-    raise SystemExit(f"ERROR: no *.sln found under {repo}")
+    raise SystemExit(f"ERROR: no *.slnx/*.sln found under {repo}")
+
+
+def slnx_projects(slnx: Path) -> list[str]:
+    """Project paths declared by a .slnx file, in document order.
+
+    .slnx is plain XML: <Project Path="..."/> entries, optionally nested
+    inside <Folder> elements (nesting is ignored — only membership matters).
+    """
+    try:
+        root = ET.parse(str(slnx)).getroot()
+    except ET.ParseError as e:
+        raise SystemExit(f"ERROR: cannot parse {slnx}: {e}")
+    paths = [p for p in ((el.get("Path") or "").strip() for el in root.iter("Project")) if p]
+    if not paths:
+        raise SystemExit(f"ERROR: {slnx} declares no <Project Path=.../> entries")
+    return paths
+
+
+def slnx_to_sln(slnx: Path) -> Path:
+    """Materialize a transient classic .sln with the .slnx's membership.
+
+    crap4dotnet rejects .slnx outright, so the CRAP audit analyzes through
+    this shim instead: same projects, classic format, deterministic content
+    (uuid5 GUIDs derived from the project path, so same .slnx ⇒ same bytes).
+    The file lives next to the .slnx because the tool resolves entries
+    relative to the .sln; run_tool() removes it afterwards.
+    """
+    lines = [
+        "Microsoft Visual Studio Solution File, Format Version 12.00",
+        "# Visual Studio Version 17",
+        "VisualStudioVersion = 17.0.31903.59",
+        "MinimumVisualStudioVersion = 10.0.40219.1",
+    ]
+    for rel in slnx_projects(slnx):
+        entry = rel.replace("/", "\\")
+        guid = uuid.uuid5(uuid.NAMESPACE_URL, rel.replace("\\", "/").lower())
+        name = Path(rel).stem
+        lines += [
+            f'Project("{CSHARP_PROJECT_TYPE}") = "{name}", "{entry}", "{{{str(guid).upper()}}}"',
+            "EndProject",
+        ]
+    lines += [
+        "Global",
+        "\tGlobalSection(SolutionConfigurationPlatforms) = preSolution",
+        "\t\tDebug|Any CPU = Debug|Any CPU",
+        "\t\tRelease|Any CPU = Release|Any CPU",
+        "\tEndGlobalSection",
+        "EndGlobal",
+        "",
+    ]
+    sln = slnx.with_name(slnx.stem + SLNX_TMP_SUFFIX)
+    sln.write_text("\n".join(lines), encoding="utf-8")
+    return sln
 
 
 @lru_cache(maxsize=None)
@@ -152,12 +217,23 @@ def run_tool(cov: Path, threshold: int) -> None:
     print(f"==> Running dotnet-crap analyze (threshold={threshold})...")
     env = {**os.environ, "DOTNET_ROLL_FORWARD": "LatestMajor"}
     tool = dotnet_crap_path()
-    subprocess.run(  # tool exits 1 when crappy methods exist; not a script failure
-        [str(tool), "analyze", str(solution_path()),
-         "--coverage", str(cov), "--threshold", str(threshold),
-         "--output", str(REPORT)],
-        env=env, check=False,
-    )
+    solution = solution_path()
+    shim: Path | None = None
+    try:
+        if solution.suffix.lower() == ".slnx":
+            # crap4dotnet rejects .slnx; analyze the same membership via a
+            # transient classic .sln instead (removed in finally).
+            shim = slnx_to_sln(solution)
+            solution = shim
+        subprocess.run(  # tool exits 1 when crappy methods exist; not a script failure
+            [str(tool), "analyze", str(solution),
+             "--coverage", str(cov), "--threshold", str(threshold),
+             "--output", str(REPORT)],
+            env=env, check=False,
+        )
+    finally:
+        if shim is not None:
+            shim.unlink(missing_ok=True)
 
 
 def include_or_not_tests(include_tests: bool, namespace: str) -> bool:

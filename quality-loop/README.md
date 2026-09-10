@@ -24,7 +24,7 @@ machine-checkable gates** that both CI and coding agents can act on:
   coverage — anti-gaming rules in [`SKILL.md`](SKILL.md) reject
   `[ExcludeFromCodeCoverage]`, `# pragma: no cover`, swallowed exceptions, and
   line-shuffling "refactors".
-- **One loop for both stacks.** Stack is auto-detected (`*.sln`/`*.csproj` →
+- **One loop for both stacks.** Stack is auto-detected (`*.sln`/`*.slnx`/`*.csproj` →
   .NET, `pyproject.toml`/`setup.py`/`requirements.txt` → Python), same gate
   semantics, same queue/report JSON schema, so your workflow is identical
   either way.
@@ -92,6 +92,9 @@ python3 scripts/dotnet/stryker-audit.py
 
 - `crap4dotnet` targets net8 while installed runtimes are 9/10; the audits set
   `DOTNET_ROLL_FORWARD=LatestMajor` for it and the stryker testhost.
+- `.slnx` (XML) solutions are discovered first. `dotnet build`/`test` consume them
+  natively; the CRAP audit analyzes the same membership through a transient
+  classic `.sln` (crap4dotnet rejects `.slnx`), removed afterwards.
 - The warnings audit builds with `--no-incremental` (up-to-date projects can't
   hide warnings) and `DOTNET_CLI_UI_LANGUAGE=en` (localized SDKs parse
   identically). NUxxxx NuGet-audit warnings follow feed advisory data, the one

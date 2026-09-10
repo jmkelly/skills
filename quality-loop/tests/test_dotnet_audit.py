@@ -40,6 +40,102 @@ def make_dotnet_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def make_dotnet_slnx_repo(tmp_path: Path) -> Path:
+    """A minimal repo with a .slnx solution (Folder-nested, mixed separators)."""
+    (tmp_path / "Acme.slnx").write_text(
+        "<Solution>\n"
+        '  <Folder Name="/src/">\n'
+        '    <Project Path="src/Acme.Core/Acme.Core.csproj" />\n'
+        "  </Folder>\n"
+        '  <Project Path="tests\\Acme.Tests\\Acme.Tests.csproj" />\n'
+        "</Solution>\n"
+    )
+    (tmp_path / "Acme.Tests.csproj").write_text("")
+    return tmp_path
+
+
+# ------------------------------------------------------- solution discovery
+
+def test_solution_path_prefers_slnx_over_sln(tmp_path):
+    make_dotnet_repo(tmp_path)
+    (tmp_path / "Acme.slnx").write_text("<Solution />")
+    assert da.solution_path(tmp_path) == tmp_path / "Acme.slnx"
+
+
+def test_solution_path_finds_nested_slnx(tmp_path):
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "App.slnx").write_text("<Solution />")
+    assert da.solution_path(tmp_path) == nested / "App.slnx"
+
+
+def test_solution_path_missing_mentions_slnx(tmp_path):
+    with pytest.raises(SystemExit, match=r"no \*\.slnx/\*\.sln found"):
+        da.solution_path(tmp_path)
+
+
+# ------------------------------------------------------------ slnx support
+
+def test_slnx_projects_flat_and_nested(tmp_path):
+    slnx = tmp_path / "Acme.slnx"
+    slnx.write_text(
+        '<Solution><Project Path="a/A.csproj" />'
+        '<Folder Name="/t/"><Project Path="t\\B.Tests.csproj" /></Folder></Solution>'
+    )
+    assert da.slnx_projects(slnx) == ["a/A.csproj", "t\\B.Tests.csproj"]
+
+
+def test_slnx_projects_rejects_empty_and_malformed(tmp_path):
+    empty = tmp_path / "Empty.slnx"
+    empty.write_text("<Solution />")
+    with pytest.raises(SystemExit, match="declares no <Project"):
+        da.slnx_projects(empty)
+    bad = tmp_path / "Bad.slnx"
+    bad.write_text("<Solution><Project")
+    with pytest.raises(SystemExit, match="cannot parse"):
+        da.slnx_projects(bad)
+
+
+def test_slnx_to_sln_materializes_classic_format(tmp_path):
+    make_dotnet_slnx_repo(tmp_path)
+    sln = da.slnx_to_sln(tmp_path / "Acme.slnx")
+    assert sln == tmp_path / "Acme.quality-loop-tmp.sln"
+    text = sln.read_text()
+    assert "Microsoft Visual Studio Solution File" in text
+    # forward slashes normalized to classic backslash entries
+    assert '"src\\Acme.Core\\Acme.Core.csproj"' in text
+    assert '"tests\\Acme.Tests\\Acme.Tests.csproj"' in text
+    # deterministic: same input -> byte-identical output
+    digest = hash(text)
+    sln.unlink()
+    assert hash(da.slnx_to_sln(tmp_path / "Acme.slnx").read_text()) == digest
+    (tmp_path / "Acme.quality-loop-tmp.sln").unlink()
+
+
+def test_run_tool_shims_slnx_and_cleans_up(tmp_path, monkeypatch):
+    make_dotnet_slnx_repo(tmp_path)
+    monkeypatch.setattr(da, "REPO", tmp_path)
+    monkeypatch.setattr(da, "REPORT", tmp_path / "crap-report.json")
+    monkeypatch.setattr(da, "dotnet_crap_path", lambda: Path("/tools/dotnet-crap"))
+    calls = []
+    monkeypatch.setattr(da.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    da.run_tool(tmp_path / "coverage.xml", 10)
+    assert calls[0][2] == str(tmp_path / "Acme.quality-loop-tmp.sln")
+    assert not (tmp_path / "Acme.quality-loop-tmp.sln").exists()  # transient shim removed
+
+
+def test_run_tool_passes_sln_directly_without_shim(tmp_path, monkeypatch):
+    make_dotnet_repo(tmp_path)
+    monkeypatch.setattr(da, "REPO", tmp_path)
+    monkeypatch.setattr(da, "REPORT", tmp_path / "crap-report.json")
+    monkeypatch.setattr(da, "dotnet_crap_path", lambda: Path("/tools/dotnet-crap"))
+    calls = []
+    monkeypatch.setattr(da.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    da.run_tool(tmp_path / "coverage.xml", 10)
+    assert calls[0][2] == str(tmp_path / "Acme.sln")
+    assert not list(tmp_path.glob("*.quality-loop-tmp.sln"))  # no shim for classic .sln
+
+
 # ---------------------------------------------------------------- repo root
 
 def test_git_root(monkeypatch):
@@ -203,7 +299,7 @@ def test_run_tool_requires_solution(tmp_path, monkeypatch):
     monkeypatch.setattr(da, "REPO", tmp_path)
     monkeypatch.setattr(da, "dotnet_crap_path", lambda: Path("/tools/dotnet-crap"))
     monkeypatch.setattr(da.subprocess, "run", lambda *a, **k: fake_proc(0))
-    with pytest.raises(SystemExit, match="no \\*.sln found"):
+    with pytest.raises(SystemExit, match=r"no \*\.slnx/\*\.sln found"):
         da.run_tool(tmp_path / "coverage.xml", 10)
 
 

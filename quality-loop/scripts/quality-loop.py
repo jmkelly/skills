@@ -164,7 +164,8 @@ class ImplementorConfig:
 
 
 def dotnet_marker(repo: Path) -> bool:
-    return any(repo.glob("*.sln")) or any(repo.glob("*.csproj"))
+    return (any(repo.glob("*.slnx")) or any(repo.glob("*.sln"))
+            or any(repo.glob("*.csproj")))
 
 
 def setup_files(repo: Path) -> bool:
@@ -184,7 +185,7 @@ def python_or_error(repo: Path) -> str:
         return "python"
     raise SystemExit(
         "ERROR: cannot detect the project stack in the repo root "
-        f"({repo}) — expected a .NET (sln/csproj) or Python (pyproject.toml/setup.py/requirements.txt) project."
+        f"({repo}) — expected a .NET (sln/slnx/csproj) or Python (pyproject.toml/setup.py/requirements.txt) project."
     )
 
 

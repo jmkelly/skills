@@ -47,6 +47,9 @@ def test_dotnet_marker(tmp_path):
     assert not ql.dotnet_marker(tmp_path)
     (tmp_path / "App.sln").write_text("")
     assert ql.dotnet_marker(tmp_path)
+    (tmp_path / "App.sln").unlink()
+    (tmp_path / "App.slnx").write_text("")
+    assert ql.dotnet_marker(tmp_path)
 
 
 def test_setup_files(tmp_path):
@@ -85,6 +88,11 @@ def test_detect_stack(tmp_path):
     (tmp_path / "pyproject.toml").unlink()
     with pytest.raises(SystemExit):
         ql.detect_stack(tmp_path)
+
+
+def test_detect_stack_slnx_only(tmp_path):
+    (tmp_path / "App.slnx").write_text("")
+    assert ql.detect_stack(tmp_path) == "dotnet"
 
 
 # --------------------------------------------------------------- audit map

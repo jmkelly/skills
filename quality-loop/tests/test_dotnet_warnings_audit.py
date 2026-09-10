@@ -141,9 +141,30 @@ def test_main_no_gate_exits_0_even_with_warnings(monkeypatch, tmp_path):
     assert run_main(monkeypatch, "--no-gate") == 0
 
 
+def test_solution_path_prefers_slnx(tmp_path):
+    (tmp_path / "App.sln").write_text("")
+    (tmp_path / "App.slnx").write_text("<Solution />")
+    assert wa.solution_path(tmp_path) == tmp_path / "App.slnx"
+
+
+def test_main_builds_slnx_solution(monkeypatch, tmp_path):
+    monkeypatch.setattr(wa, "REPO", tmp_path)
+    monkeypatch.setattr(wa, "REPORT", tmp_path / "warnings-report.json")
+    monkeypatch.setattr(wa, "QUEUE", tmp_path / "warnings-queue.md")
+    (tmp_path / "App.slnx").write_text("<Solution />")
+    proc = wa.subprocess.CompletedProcess([], 0, stdout="Build succeeded.\n", stderr="")
+
+    def fake_build(solution):
+        assert solution == tmp_path / "App.slnx"  # .slnx passed straight to dotnet build
+        return proc
+
+    monkeypatch.setattr(wa, "run_build", fake_build)
+    assert run_main(monkeypatch) == 0
+
+
 def test_main_missing_solution_exits_error(monkeypatch, tmp_path):
     monkeypatch.setattr(wa, "REPO", tmp_path)
-    with pytest.raises(SystemExit, match="no \\*.sln found"):
+    with pytest.raises(SystemExit, match=r"no \*\.slnx/\*\.sln found"):
         run_main(monkeypatch)
 
 

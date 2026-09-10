@@ -75,12 +75,17 @@ PROJECT_PREFIX = re.compile(r"^\d+>")
 
 
 def solution_path(repo: Path | None = None) -> Path:
-    """The repo's .sln — root files first, then the shallowest nested one."""
+    """The repo's solution — .slnx first (.NET 9+ XML format), then .sln.
+
+    Root files first, then the shallowest nested one. `dotnet build`
+    consumes .slnx natively, so no shim is needed here (unlike the CRAP audit).
+    """
     repo = repo or REPO
-    for cand in (*repo.glob("*.sln"),
-                 *sorted(repo.rglob("*.sln"), key=lambda p: (len(p.parts), str(p)))):
+    for cand in (*repo.glob("*.slnx"), *repo.glob("*.sln"),
+                 *sorted((*repo.rglob("*.slnx"), *repo.rglob("*.sln")),
+                         key=lambda p: (len(p.parts), str(p)))):
         return cand
-    raise SystemExit(f"ERROR: no *.sln found under {repo}")
+    raise SystemExit(f"ERROR: no *.slnx/*.sln found under {repo}")
 
 
 def print_tail(proc: subprocess.CompletedProcess) -> None:

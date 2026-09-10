@@ -11,7 +11,7 @@ current working directory; the scripts resolve the git repo root themselves.
 
 Deterministic gates, one set per stack — same source + same tool version + same config
 ⇒ same result, so they are safe to run in CI and safe to drive an agent fix-loop from.
-The stack is detected from the repo root: `*.sln`/`*.csproj` → .NET;
+The stack is detected from the repo root: `*.sln`/`*.slnx`/`*.csproj` → .NET;
 `pyproject.toml`/`setup.py`/`requirements.txt` → Python.
 
 A gate is **red** while its queue still lists offenders (the audit exits 1); the loop
@@ -178,6 +178,10 @@ python3 scripts/python/warnings-audit.py    # pyflakes over every .py file
 - **.NET**: `crap4dotnet` is a global tool targeting net8 while installed runtimes are
   9/10, so `scripts/dotnet/audit.py` sets `DOTNET_ROLL_FORWARD=LatestMajor`; the stryker
   audit does the same for its testhost.
+- **.NET**: solutions in the newer `.slnx` (XML) format are discovered first;
+  `dotnet build`/`dotnet test` consume them natively, while the CRAP audit analyzes
+  the same membership through a transient classic `.sln` (crap4dotnet rejects
+  `.slnx`), removed afterwards — same `.slnx` ⇒ byte-identical shim ⇒ same result.
 - **.NET**: the warnings audit builds `--no-incremental` and pins `DOTNET_CLI_UI_LANGUAGE=en`,
   so results don't depend on incremental-build state or the SDK's locale. NuGet audit
   warnings (NUxxxx, e.g. NU1901) follow feed advisory data and can change over time — the
