@@ -19,7 +19,7 @@ is done only when every gate is **green** (the audit exits 0, the queue empty).
 
 | Stack | Gate | Tool | Gate rule | Queue written |
 |---|---|---|---|---|
-| .NET | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method (test project excluded) | `crap-queue.md` |
+| .NET | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method (test projects excluded) | `crap-queue.md` |
 | .NET | coverage | `coverage-audit.py` (coverlet cobertura over authored code only) | **authored branch coverage ≥ floor** (`coverage-policy.json`, default 70%) | `coverage-queue.md` |
 | .NET | metrics | `Dependably.CodeMetrics` over Roslyn | `.dependably` rules (MI ≥ 20, cyclomatic ≤ 25, …) | `metrics-queue.md` |
 | .NET | warnings | `dotnet build --no-incremental` | **zero build warnings** (compiler/analyzer/NuGet/MSBuild) | `warnings-queue.md` |
@@ -71,10 +71,13 @@ python3 scripts/dotnet/audit.py                  # .NET: dotnet test + crap4dotn
 python3 scripts/python/audit.py                  # Python: coverage run -m pytest + radon
 python3 scripts/dotnet/audit.py --skip-tests     # reuse last coverage.cobertura.xml (stale — reports an older tree)
 python3 scripts/python/audit.py --skip-tests     # reuse last artifacts/coverage.json (stale — reports an older tree)
-python3 scripts/dotnet/audit.py --include-tests  # also gate the test project / tests/ dir
+python3 scripts/dotnet/audit.py --include-tests  # also gate the test projects / tests/ dir
 ```
 
-.NET always runs `dotnet test` (Testcontainers Postgres, ~40–60 s); Python runs
+.NET runs `dotnet test` on the solution — every `*.Tests.csproj` runs, one
+coverage.cobertura.xml per test project, merged (a line hit in ANY project
+counts as covered) before analysis; every `*.Tests` namespace is excluded
+from the gate. Python runs
 `coverage run -m pytest -q` (needs `pip install radon coverage` plus the project's test
 deps). Both write to the repo root with the **same schema**:
 
@@ -111,11 +114,12 @@ Repo policy: `coverage-policy.json` at the repo root — `{"branchFloor": 75,
 `coverage-report.json` (per-project and per excluded-category stats),
 `coverage-queue.md`, and appends a trend row to `coverage-history.csv`.
 
-The coverage data comes from the newest
-`artifacts/test-results/coverage.cobertura.xml` — the quality (CRAP) audit
-regenerates it in the same loop iteration, so the loop runs coverage right
-after quality at no extra test cost. Standalone, it reuses the newest file
-when present and otherwise runs `dotnet test` itself.
+The coverage data comes from every
+`artifacts/test-results/**/coverage.cobertura.xml` — merged the same way as
+the quality audit (which regenerates them in the same loop iteration, so the
+loop runs coverage right after quality at no extra test cost). Standalone, it
+merges whatever files are present when they exist and otherwise runs
+`dotnet test` on the solution itself.
 
 ### Metrics audit — `scripts/dotnet/metrics-audit.py` (via repo) or `scripts/python/metrics-audit.py`
 
@@ -125,10 +129,13 @@ when present and otherwise runs `dotnet test` itself.
   (rules, excludes, grandfathered exceptions). Without one, the audit falls back to the
   skill-bundled `.dependably.default` next to it (generic thresholds, no exceptions).
   ~10 s.
-- **.NET mutation**: `scripts/dotnet/stryker-audit.py` is likewise skill-local; the repo
-  carries `stryker-config.json` in the test project (project under test, thresholds,
-  reporters). Without one, the audit generates a default config pinned to the test
-  project's single ProjectReference (or `--project <csproj>`). Generated configs always
+- **.NET mutation**: `scripts/dotnet/stryker-audit.py` is likewise skill-local; each
+  test project carries its own `stryker-config.json` (project under test,
+  thresholds, reporters) — the audit runs every `*.Tests.csproj` in turn and
+  combines the surviving mutants into one queue (gate: every project meets
+  its own `thresholds.break`). Without a config, the audit generates a default
+  pinned to that test project's single ProjectReference (or `--project <csproj>`
+  when there is exactly one test project). Generated configs always
   use an absolute csproj path — Stryker refuses to guess with multiple references and
   cannot resolve bare/relative `project` names reliably. ~11 min (skip when you need
   fast feedback).

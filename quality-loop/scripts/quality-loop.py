@@ -13,7 +13,7 @@ gates:
 
 All .NET audits are skill-local and repo-agnostic (repo/solution/test-project
 discovery); repos carry only *policy* files: a `.dependably` at the repo root
-(rules/excludes/exceptions), a `stryker-config.json` in the test project
+(rules/excludes/exceptions), a `stryker-config.json` in each test project
 (project under test, thresholds), a `coverage-policy.json` at the repo root
 (branch floor / queue size), and project-level `<NoWarn>` entries
 (warning suppression). See SKILL.md for the bundled default configs.

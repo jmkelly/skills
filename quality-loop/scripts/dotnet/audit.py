@@ -19,9 +19,14 @@ import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
-from functools import lru_cache, partial
+from functools import partial
 from operator import itemgetter
 from pathlib import Path
+
+try:  # pytest: imported as scripts.dotnet.audit
+    from scripts.dotnet.coverage_merge import write_merged
+except ImportError:  # standalone: python3 scripts/dotnet/audit.py
+    from coverage_merge import write_merged
 
 
 def git_root(start: Path) -> Path | None:
@@ -123,26 +128,19 @@ def slnx_to_sln(slnx: Path) -> Path:
     return sln
 
 
-@lru_cache(maxsize=None)
-def _test_project(repo: Path) -> Path | None:
-    for cand in (*repo.glob("*.Tests.csproj"),
-                 *sorted(repo.rglob("*.Tests.csproj"), key=lambda p: (len(p.parts), str(p)))):
-        return cand
-    return None
-
-
-def test_project(repo: Path | None = None) -> Path:
-    """The repo's test project (*.Tests.csproj — root first, then shallowest)."""
+def test_projects(repo: Path | None = None) -> list[Path]:
+    """Every *.Tests.csproj — root first, then shallowest nested, sorted."""
     repo = repo or REPO
-    project = _test_project(repo)
-    if project is None:
+    projects = list(dict.fromkeys((*repo.glob("*.Tests.csproj"),
+                 *sorted(repo.rglob("*.Tests.csproj"), key=lambda p: (len(p.parts), str(p))))))
+    if not projects:
         raise SystemExit(f"ERROR: no *.Tests.csproj found under {repo}")
-    return project
+    return projects
 
 
-def test_namespace(repo: Path | None = None) -> str:
-    """Namespace prefix of the test project; the gate excludes it by default."""
-    return test_project(repo).stem
+def test_namespaces(repo: Path | None = None) -> list[str]:
+    """Namespace prefixes of the test projects; the gate excludes them by default."""
+    return [p.stem for p in test_projects(repo)]
 
 CAPS: dict[int, int] = {3: 58, 4: 70}  # column index -> max chars; missing = no cap
 
@@ -167,13 +165,22 @@ def print_tail(proc: subprocess.CompletedProcess) -> None:
         print(tail)
 
 
+MERGED_NAME = "merged.cobertura.xml"
+
+
 def run_tests_with_coverage() -> Path | None:
-    """Run the test suite and return the resulting coverage.cobertura.xml path."""
-    print("==> Running tests with coverage (dotnet test + Testcontainers Postgres)...")
+    """Run the solution's whole test suite and return the merged coverage file.
+
+    `dotnet test` on the solution runs every test project (one
+    coverage.cobertura.xml each); the per-project files are merged so the
+    gate sees the whole suite.
+    """
+    test_projects()  # fail fast with the discovery error before testing
+    print("==> Running tests with coverage (dotnet test <solution>)...")
     shutil.rmtree(RESULTS_DIR, ignore_errors=True)
     proc = subprocess.run(
         [
-            "dotnet", "test", str(test_project()),
+            "dotnet", "test", str(solution_path()),
             "--collect:XPlat Code Coverage",
             "--results-directory", str(RESULTS_DIR),
             "-v", "quiet",
@@ -183,26 +190,39 @@ def run_tests_with_coverage() -> Path | None:
     print_tail(proc)
     if proc.returncode != 0:
         raise SystemExit(f"ERROR: dotnet test failed (exit {proc.returncode})")
-    return next(RESULTS_DIR.rglob("coverage.cobertura.xml"), None)
+    return merge_results(RESULTS_DIR)
 
 
-def newest_coverage() -> Path | None:
-    matches = list(RESULTS_DIR.rglob("coverage.cobertura.xml"))
-    if not matches:
+def newest_coverages(results_dir: Path | None = None) -> list[Path]:
+    """Every coverage.cobertura.xml under the results dir, oldest first."""
+    results_dir = results_dir or RESULTS_DIR
+    return sorted(results_dir.rglob("coverage.cobertura.xml"),
+                  key=lambda p: (p.stat().st_mtime, str(p)))
+
+
+def merge_results(results_dir: Path | None = None) -> Path | None:
+    """Merge every coverage file found; one file is returned as-is."""
+    covs = newest_coverages(results_dir)
+    if not covs:
         return None
-    return max(matches, key=lambda p: p.stat().st_mtime)
+    if len(covs) == 1:
+        return covs[0]
+    out = (results_dir or RESULTS_DIR) / MERGED_NAME
+    print(f"==> Merging {len(covs)} coverage files -> {out.name}...")
+    return write_merged(covs, out)
 
 
-def warn_stale(cov: Path | None) -> None:
-    if cov:
-        print(f"==> WARNING: --skip-tests reusing {cov} (stale coverage)")
+def warn_stale(covs: list[Path]) -> None:
+    if covs:
+        print(f"==> WARNING: --skip-tests reusing {len(covs)} file(s), "
+              f"newest {covs[-1]} (stale coverage)")
 
 
 def choose_coverage(args: argparse.Namespace) -> Path | None:
     if args.skip_tests:
-        cov = newest_coverage()
-        warn_stale(cov)
-        return cov
+        covs = newest_coverages()
+        warn_stale(covs)
+        return merge_results(RESULTS_DIR)
     return run_tests_with_coverage()
 
 
@@ -237,7 +257,7 @@ def run_tool(cov: Path, threshold: int) -> None:
 
 
 def include_or_not_tests(include_tests: bool, namespace: str) -> bool:
-    return include_tests or not namespace.startswith(test_namespace())
+    return include_tests or not any(namespace.startswith(ns) for ns in test_namespaces())
 
 
 def is_failing(method: dict, threshold: int, include_tests: bool) -> bool:

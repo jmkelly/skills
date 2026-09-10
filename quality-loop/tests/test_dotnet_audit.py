@@ -186,7 +186,7 @@ def test_dotnet_crap_path_falls_back_home(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------------- coverage
 
-def test_newest_coverage(tmp_path, monkeypatch):
+def test_newest_coverages_oldest_first(tmp_path, monkeypatch):
     results = tmp_path / "artifacts" / "test-results"
     monkeypatch.setattr(da, "RESULTS_DIR", results)
     (results / "run1").mkdir(parents=True)
@@ -198,25 +198,63 @@ def test_newest_coverage(tmp_path, monkeypatch):
     old = 1_000_000_000
     os.utime(c1, (old, old))
     os.utime(c2, (old + 100, old + 100))
-    assert da.newest_coverage() == c2
-    assert da.newest_coverage().read_text() == "b"
+    assert da.newest_coverages() == [c1, c2]
 
 
-def test_newest_coverage_none(tmp_path, monkeypatch):
+def test_newest_coverages_none(tmp_path, monkeypatch):
     monkeypatch.setattr(da, "RESULTS_DIR", tmp_path)
-    assert da.newest_coverage() is None
+    assert da.newest_coverages() == []
+
+
+def test_merge_results_none_single_and_multi(tmp_path, monkeypatch):
+    monkeypatch.setattr(da, "RESULTS_DIR", tmp_path)
+    assert da.merge_results(tmp_path) is None
+    only = tmp_path / "coverage.cobertura.xml"
+    only.write_text("<coverage />")
+    assert da.merge_results(tmp_path) == only  # single file passes through
+    (tmp_path / "other").mkdir()
+    other = tmp_path / "other" / "coverage.cobertura.xml"
+    other.write_text("<coverage />")
+    merged = []
+
+    def fake_write(covs, out):
+        merged.append((list(covs), out))
+        return out
+
+    monkeypatch.setattr(da, "write_merged", fake_write)
+    assert da.merge_results(tmp_path) == tmp_path / "merged.cobertura.xml"
+    assert [c.name for c in merged[0][0]] == ["coverage.cobertura.xml"] * 2
+
+
+def test_test_projects_order_and_namespaces(tmp_path):
+    (tmp_path / "Root.Tests.csproj").write_text("")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "A.Tests.csproj").write_text("")
+    (nested / "B.Tests.csproj").write_text("")
+    assert da.test_projects(tmp_path) == [tmp_path / "Root.Tests.csproj",
+                                           nested / "A.Tests.csproj",
+                                           nested / "B.Tests.csproj"]
+    assert da.test_namespaces(tmp_path) == ["Root.Tests", "A.Tests", "B.Tests"]
+
+
+def test_test_projects_missing_raises(tmp_path):
+    with pytest.raises(SystemExit, match="no \*.Tests.csproj found"):
+        da.test_projects(tmp_path)
 
 
 def test_warn_stale(capsys):
-    da.warn_stale(Path("/x/coverage.xml"))
-    assert "WARNING: --skip-tests reusing" in capsys.readouterr().out
-    da.warn_stale(None)
+    da.warn_stale([Path("/x/a/coverage.cobertura.xml"), Path("/x/b/coverage.cobertura.xml")])
+    out = capsys.readouterr().out
+    assert "WARNING: --skip-tests reusing 2 file(s)" in out
+    da.warn_stale([])
     assert capsys.readouterr().out == ""
 
 
 def test_choose_coverage_skip_tests(monkeypatch, capsys):
     cov = Path("/x/coverage.xml")
-    monkeypatch.setattr(da, "newest_coverage", lambda: cov)
+    monkeypatch.setattr(da, "newest_coverages", lambda *a: [cov])
+    monkeypatch.setattr(da, "merge_results", lambda *a: cov)
     assert da.choose_coverage(Namespace(skip_tests=True)) == cov
     assert "WARNING" in capsys.readouterr().out
 
@@ -253,7 +291,9 @@ def test_run_tests_with_coverage(tmp_path, monkeypatch):
     cov = da.run_tests_with_coverage()
     assert cov is not None and cov.name == "coverage.cobertura.xml"
     assert cov.exists()
-    assert str(tmp_path / "Acme.Tests.csproj") in calls[0]  # test project is discovered
+    # the whole solution is tested, not one test project
+    assert calls[0][:2] == ["dotnet", "test"]
+    assert str(tmp_path / "Acme.sln") in calls[0]
 
 
 def test_run_tests_with_coverage_failure(tmp_path, monkeypatch):

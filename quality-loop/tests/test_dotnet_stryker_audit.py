@@ -54,13 +54,26 @@ def write_report(test_dir: Path, report: dict) -> None:
     (out / "mutation-report.json").write_text(json.dumps(report))
 
 
+def make_named_projects(tmp_path: Path, name: str, refs: tuple[str, ...]) -> Path:
+    """A `<name>` test-project dir whose csproj references the given libs."""
+    test_dir = tmp_path / name
+    test_dir.mkdir()
+    for lib in refs:
+        (tmp_path / lib).mkdir(exist_ok=True)
+        (tmp_path / lib / f"{lib}.csproj").write_text("<Project />")
+    includes = "\n".join(f'    <ProjectReference Include="..\\{lib}\\{lib}.csproj" />' for lib in refs)
+    (test_dir / f"{name}.csproj").write_text(
+        "<Project>\n  <ItemGroup>\n" + includes + "\n  </ItemGroup>\n</Project>\n"
+    )
+    return test_dir
+
+
 @pytest.fixture
 def patched(tmp_path, monkeypatch) -> Path:
     """REPO -> tmp_path with a test project referencing a single lib (LibA)."""
     test_dir = make_projects(tmp_path, refs=("LibA",))
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
-    ds._test_project.cache_clear()
     return test_dir
 
 
@@ -70,8 +83,17 @@ def patched_multi(tmp_path, monkeypatch) -> Path:
     test_dir = make_projects(tmp_path, refs=("LibA", "LibB"))
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
-    ds._test_project.cache_clear()
     return test_dir
+
+
+@pytest.fixture
+def patched_two_projects(tmp_path, monkeypatch) -> tuple[Path, Path]:
+    """REPO -> tmp_path with TWO single-ref test projects (A.Tests, B.Tests)."""
+    a = make_named_projects(tmp_path, "A.Tests", ("LibA",))
+    b = make_named_projects(tmp_path, "B.Tests", ("LibB",))
+    monkeypatch.setattr(ds, "REPO", tmp_path)
+    monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    return a, b
 
 
 def fake_subprocess(monkeypatch, calls: dict, returncode: int = 0) -> None:
@@ -93,46 +115,46 @@ def fake_subprocess(monkeypatch, calls: dict, returncode: int = 0) -> None:
 # ------------------------------------------------------- project discovery
 
 def test_referenced_projects_parse_and_resolve(patched_multi):
-    refs = ds.referenced_projects(ds.REPO)
+    refs = ds.referenced_projects(patched_multi / "Proj.Tests.csproj")
     assert refs == [ds.REPO / "LibA" / "LibA.csproj", ds.REPO / "LibB" / "LibB.csproj"]
 
 
-def test_test_project_root_wins_over_nested(tmp_path, monkeypatch):
+def test_test_projects_root_wins_over_nested(tmp_path):
     (tmp_path / "Proj.Tests.csproj").write_text("<Project />")
     nested = tmp_path / "Sub" / "Proj.Tests"
     nested.mkdir(parents=True)
     (nested / "Proj.Tests.csproj").write_text("<Project />")
-    ds._test_project.cache_clear()
-    assert ds.test_project(tmp_path) == tmp_path / "Proj.Tests.csproj"
+    assert ds.test_projects(tmp_path) == [tmp_path / "Proj.Tests.csproj",
+                                           nested / "Proj.Tests.csproj"]
 
 
-def test_test_project_missing_raises(tmp_path):
-    ds._test_project.cache_clear()
-    with pytest.raises(SystemExit):
-        ds.test_project(tmp_path)
+def test_test_projects_missing_raises(tmp_path):
+    with pytest.raises(SystemExit, match=r"no \*.Tests.csproj found"):
+        ds.test_projects(tmp_path)
 
 
 def test_choose_project_single_reference(tmp_path, monkeypatch):
     test_dir = make_projects(tmp_path, refs=("LibA",))
     monkeypatch.setattr(ds, "REPO", tmp_path)
-    ds._test_project.cache_clear()
-    assert ds.choose_project(ds.REPO, None) == (tmp_path / "LibA" / "LibA.csproj")
+    assert ds.choose_project_for(test_dir / "Proj.Tests.csproj", None) == (tmp_path / "LibA" / "LibA.csproj")
     assert test_dir == tmp_path / "Proj.Tests"
 
 
 def test_choose_project_multiple_references_raises(patched_multi):
     with pytest.raises(SystemExit, match="stryker-config.json"):
-        ds.choose_project(ds.REPO, None)
+        ds.choose_project_for(patched_multi / "Proj.Tests.csproj", None)
 
 
 def test_choose_project_explicit_relative_resolves_against_test_dir(patched):
-    assert ds.choose_project(ds.REPO, "../LibA/LibA.csproj") == (ds.REPO / "LibA" / "LibA.csproj")
+    proj = patched / "Proj.Tests.csproj"
+    assert ds.choose_project_for(proj, "../LibA/LibA.csproj") == (ds.REPO / "LibA" / "LibA.csproj")
     # bare names stay relative to the test project dir (like ProjectReference)
-    assert ds.choose_project(ds.REPO, "LibA/LibA.csproj") == (patched / "LibA" / "LibA.csproj")
+    assert ds.choose_project_for(proj, "LibA/LibA.csproj") == (patched / "LibA" / "LibA.csproj")
 
 
 def test_choose_project_explicit_absolute(patched):
-    assert ds.choose_project(ds.REPO, str(ds.REPO / "LibA" / "LibA.csproj")) == (ds.REPO / "LibA" / "LibA.csproj")
+    proj = patched / "Proj.Tests.csproj"
+    assert ds.choose_project_for(proj, str(ds.REPO / "LibA" / "LibA.csproj")) == (ds.REPO / "LibA" / "LibA.csproj")
 
 
 # ------------------------------------------------------- config selection
@@ -202,3 +224,39 @@ def test_stryker_failure_passthrough(patched, monkeypatch):
 def test_missing_tool_returns_2(patched, monkeypatch):
     monkeypatch.setattr(ds, "find_tool", lambda name: None)
     assert run_main(monkeypatch) == 2
+
+
+# ------------------------------------------------------- multiple projects
+
+def test_main_runs_every_test_project(patched_two_projects, monkeypatch):
+    a, b = patched_two_projects
+    calls: list = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("cwd")))
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(ds.subprocess, "run", run)
+    write_report(a, sample_mutation_report(survived=0, killed=2))
+    write_report(b, sample_mutation_report(survived=1, killed=3))
+    assert run_main(monkeypatch) == 0  # 100% and 75% both >= default break 25
+    assert [cwd for _, cwd in calls] == [a, b]
+    md = (ds.REPO / "stryker-queue.md").read_text()
+    assert "## A.Tests" in md and "## B.Tests" in md
+    assert "100.0" in md and "75.0" in md
+
+
+def test_main_fails_when_any_project_below_break(patched_two_projects, monkeypatch):
+    a, b = patched_two_projects
+    monkeypatch.setattr(ds.subprocess, "run",
+                        lambda *args, **kw: subprocess.CompletedProcess([], 0))
+    write_report(a, sample_mutation_report(survived=0, killed=2))
+    write_report(b, sample_mutation_report(survived=4, killed=1))  # 20% < break 25
+    assert run_main(monkeypatch) == 1
+    md = (ds.REPO / "stryker-queue.md").read_text()
+    assert "## B.Tests" in md
+
+
+def test_main_project_flag_ambiguous_with_two_projects(patched_two_projects, monkeypatch):
+    with pytest.raises(SystemExit, match="ambiguous"):
+        run_main(monkeypatch, "--project", "LibA/LibA.csproj")

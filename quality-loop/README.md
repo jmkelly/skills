@@ -66,17 +66,17 @@ dotnet tool install --global dotnet-stryker
 Plus the repo's test deps. All audit scripts are skill-local and
 repo-agnostic; the repo carries only *policy* files: `.dependably` at the repo
 root (rules/excludes/grandfathered exceptions — or the skill-bundled default),
-`stryker-config.json` in the test project (project under test, thresholds; the
+`stryker-config.json` in each test project (project under test, thresholds; the
 audit generates a pinned default otherwise), and project-level `<NoWarn>`
 entries (warning suppression — a specific code with a documented reason;
 blanket `NoWarn` is rejected).
 
-**Run** — CRAP audit (~1 min, includes `dotnet test`):
+**Run** — CRAP audit (~1 min, includes solution-wide `dotnet test`):
 
 ```bash
-python3 scripts/dotnet/audit.py                 # dotnet test + crap4dotnet
-python3 scripts/dotnet/audit.py --skip-tests    # reuse coverage.cobertura.xml (stale)
-python3 scripts/dotnet/audit.py --include-tests # also gate the test project
+python3 scripts/dotnet/audit.py                 # dotnet test (all test projects) + crap4dotnet
+python3 scripts/dotnet/audit.py --skip-tests    # reuse merged coverage (stale)
+python3 scripts/dotnet/audit.py --include-tests # also gate the test projects
 ```
 
 Metrics (~10 s) and mutation (~11 min — expensive, the loop only pays it when

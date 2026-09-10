@@ -38,6 +38,11 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:  # pytest: loaded as scripts.dotnet.coverage_audit
+    from scripts.dotnet.coverage_merge import write_merged
+except ImportError:  # standalone: python3 scripts/dotnet/coverage-audit.py
+    from coverage_merge import write_merged
+
 def git_root(start: Path) -> Path | None:
     try:
         return Path(subprocess.check_output(
@@ -94,24 +99,59 @@ def is_compiler_generated_class(name: str) -> bool:
     return "<" in name
 
 
-def test_namespace() -> str:
-    projects = sorted(REPO.rglob("*.Tests.csproj"), key=lambda p: (len(p.parts), str(p)))
-    return projects[0].stem if projects else ""
+def solution_path(repo: Path | None = None) -> Path:
+    """The repo's solution — .slnx first (.NET 9+ XML format), then .sln.
+
+    Root files first, then the shallowest nested one. `dotnet test`
+    consumes .slnx natively, so no shim is needed here (unlike the CRAP audit).
+    """
+    repo = repo or REPO
+    for cand in (*repo.glob("*.slnx"), *repo.glob("*.sln"),
+                 *sorted((*repo.rglob("*.slnx"), *repo.rglob("*.sln")),
+                         key=lambda p: (len(p.parts), str(p)))):
+        return cand
+    raise SystemExit(f"ERROR: no *.slnx/*.sln found under {repo}")
 
 
-def newest_coverage() -> Path | None:
-    matches = list(RESULTS_DIR.rglob("coverage.cobertura.xml"))
-    if not matches:
+def test_projects() -> list[Path]:
+    """Every *.Tests.csproj — root first, then shallowest nested, sorted."""
+    return list(dict.fromkeys((*REPO.glob("*.Tests.csproj"),
+                 *sorted(REPO.rglob("*.Tests.csproj"), key=lambda p: (len(p.parts), str(p))))))
+
+
+def test_namespaces() -> list[str]:
+    """Namespace prefixes of the test projects; coverage excludes them all."""
+    return [p.stem for p in test_projects()]
+
+
+MERGED_NAME = "merged.cobertura.xml"
+
+
+def newest_coverages() -> list[Path]:
+    """Every coverage.cobertura.xml under the results dir, oldest first."""
+    return sorted(RESULTS_DIR.rglob("coverage.cobertura.xml"),
+                  key=lambda p: (p.stat().st_mtime, str(p)))
+
+
+def merge_results() -> Path | None:
+    """Merge every coverage file found; one file is returned as-is."""
+    covs = newest_coverages()
+    if not covs:
         return None
-    return max(matches, key=lambda p: p.stat().st_mtime)
+    if len(covs) == 1:
+        return covs[0]
+    out = RESULTS_DIR / MERGED_NAME
+    print(f"==> Merging {len(covs)} coverage files -> {out.name}...")
+    return write_merged(covs, out)
 
 
 def run_tests() -> Path:
-    project = test_project()
-    print("==> No coverage file found — running dotnet test with coverage...")
+    if not test_projects():
+        raise SystemExit("ERROR: no *.Tests.csproj found under the repo root")
+    print("==> No coverage file found — running dotnet test <solution> with coverage...")
     shutil.rmtree(RESULTS_DIR, ignore_errors=True)
     proc = subprocess.run(
-        ["dotnet", "test", str(project), "--collect:XPlat Code Coverage",
+        ["dotnet", "test", str(solution_path()), "--collect:XPlat Code Coverage",
          "--results-directory", str(RESULTS_DIR), "-v", "quiet"],
         capture_output=True, text=True,
     )
@@ -120,18 +160,10 @@ def run_tests() -> Path:
         print(tail)
     if proc.returncode != 0:
         raise SystemExit(f"ERROR: dotnet test failed (exit {proc.returncode})")
-    cov = newest_coverage()
+    cov = merge_results()
     if cov is None:
         raise SystemExit(f"ERROR: dotnet test ran but produced no coverage.cobertura.xml in {RESULTS_DIR}")
     return cov
-
-
-def test_project() -> Path:
-    projects = (*REPO.glob("*.Tests.csproj"),
-                *sorted(REPO.rglob("*.Tests.csproj"), key=lambda p: (len(p.parts), str(p))))
-    if not projects:
-        raise SystemExit("ERROR: no *.Tests.csproj found under the repo root")
-    return projects[0]
 
 
 def parse_condition(condition_coverage: str) -> tuple[int, int]:
@@ -146,11 +178,11 @@ def parse_condition(condition_coverage: str) -> tuple[int, int]:
 
 def extract(root: ET.Element, limit: int):
     """Per-method data: skip generated/compiler classes; per-file dedupe for authored lines."""
-    test_ns = test_namespace()
+    test_nss = test_namespaces()
     methods, authored_files, categories = [], {}, {}
     for pkg in root.findall("packages/package"):
         pkg_name = pkg.get("name") or ""
-        if test_ns and (pkg_name == test_ns or pkg_name.startswith(test_ns + ".")):
+        if any(pkg_name == ns or pkg_name.startswith(ns + ".") for ns in test_nss):
             continue
         for cls in pkg.findall("classes/class"):
             name = cls.get("name") or ""
@@ -321,12 +353,16 @@ def main() -> int:
     policy = load_policy()
     if args.coverage:
         cov = args.coverage
-    elif args.skip_tests or newest_coverage():
-        cov = newest_coverage()
-        if cov:
-            print(f"==> Reusing newest coverage: {cov}")
     else:
-        cov = run_tests()
+        covs = newest_coverages()
+        if args.skip_tests or covs:
+            if not covs:
+                raise SystemExit(f"ERROR: no coverage.cobertura.xml found in {RESULTS_DIR}")
+            print(f"==> Reusing {len(covs)} coverage file(s), newest: {covs[-1]}")
+            cov = merge_results()
+        else:
+            cov = run_tests()
+    assert cov is not None
 
     print(f"==> Parsing {cov} (policy: {POLICY.name if POLICY.is_file() else 'defaults'})")
     root = ET.parse(str(cov)).getroot()
