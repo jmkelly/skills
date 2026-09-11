@@ -11,6 +11,15 @@ lines by number. A line hit in ANY input counts as covered: per line number
 the entry with the greatest hits wins, ties break toward greater branch
 coverage, then first-seen. Line/branch rates are recomputed from the merged
 lines; every other attribute comes from the first file that declares it.
+
+Coverlet relativizes document paths per test run (longest common prefix of
+that run's documents), so the same source file arrives as `Features/X.cs`
+from one run and `src/Proj/Features/X.cs` from another. Before merging,
+every class filename is canonicalized to its longest super-suffix variant
+(segment-boundary suffix): true sub-paths unify, while distinct files that
+merely share a basename (e.g. two `AssemblyInfo.cs`) never merge. Without
+this, unified classes split into covered + phantom-uncovered duplicates
+that inflate totals and fake CRAP/coverage offenders.
 """
 from __future__ import annotations
 
@@ -29,6 +38,30 @@ def _condition(text: str | None) -> tuple[int, int]:
     if (text or "").strip() == "100%":
         return 1, 1
     return 0, 0
+
+
+def _segments(path: str) -> list[str]:
+    return [s for s in path.replace("\\", "/").split("/") if s and s != "."]
+
+
+def _canonical_filenames(roots: list[ET.Element]) -> dict[str, str]:
+    """Map every class filename to its longest super-suffix variant.
+
+    Input-only and deterministic: for filename A that is a segment-boundary
+    suffix of a longer filename B, A canonicalizes to the longest such B
+    (lexicographically greatest on length ties). Filenames with no longer
+    super-suffix map to themselves; distinct files sharing only a basename
+    are never unified.
+    """
+    names = {c.get("filename") for r in roots for c in r.iter("class") if c.get("filename")}
+    seg = {n: _segments(n) for n in names}
+    canon = {}
+    for n in names:
+        longer = [m for m in names if m != n
+                  and len(seg[m]) > len(seg[n])
+                  and seg[m][-len(seg[n]):] == seg[n]]
+        canon[n] = max(longer, key=lambda m: (len(seg[m]), m)) if longer else n
+    return canon
 
 
 def _line_key(line: ET.Element) -> tuple[int, int, int]:
@@ -136,6 +169,12 @@ def merge_coverages(paths: list[Path] | tuple[Path, ...]) -> ET.Element:
     roots = [ET.parse(str(p)).getroot() for p in paths]
     for root in roots:
         _strip_ws(root)
+    canon = _canonical_filenames(roots)
+    for root in roots:
+        for cls in root.iter("class"):
+            fn = cls.get("filename")
+            if fn in canon:
+                cls.set("filename", canon[fn])
 
     merged = ET.Element("coverage", dict(roots[0].attrib))
     sources = ET.SubElement(merged, "sources")

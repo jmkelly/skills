@@ -201,9 +201,15 @@ python3 scripts/python/warnings-audit.py    # pyflakes over every .py file
   cannot inflate it — the exclusions are hard-coded in the audit. `--skip quality`
   while running coverage reuses whatever coverage file exists (stale), which is fine
   for experiments but not for a gate decision.
-- **.NET**: `COVERAGE_STALE` warnings (Razor-generated entries, ~71% unmatched) are known
-  noise: coverage is matched by PDB sequence points; trust the per-method numbers in the
-  JSON, not the warning.
+- **.NET**: coverlet relativizes document paths per test run (longest common
+  prefix of that run's documents), so `coverage_merge.py` canonicalizes every
+  class filename to its longest super-suffix variant before merging — without
+  this, each method counts twice (once covered, once phantom-uncovered) and
+  both the CRAP and coverage gates measure phantoms. Remaining `COVERAGE_STALE`/
+  `UNMATCHED`/`ORPHANED` warnings are crap4dotnet's own method-matching limits
+  (expression-bodied members, async state machines, accessors): coverage is
+  matched by PDB sequence points; cross-check a flagged method against the
+  merged cobertura before rewriting code to satisfy the tool.
 - **Python**: the CRAP audit's per-function coverage counts a function's line span
   (from AST `end_lineno`) against coverage.py `executed_lines`; `# pragma: no cover`
   lines don't count against it.
