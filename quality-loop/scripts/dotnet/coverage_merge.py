@@ -10,7 +10,8 @@ keyed by name, classes by (name, filename), methods by (name, signature),
 lines by number. A line hit in ANY input counts as covered: per line number
 the entry with the greatest hits wins, ties break toward greater branch
 coverage, then first-seen. Line/branch rates are recomputed from the merged
-lines; every other attribute comes from the first file that declares it.
+lines at every level (method, class, package, root); every other attribute
+comes from the first file that declares it.
 
 Coverlet relativizes document paths per test run (longest common prefix of
 that run's documents), so the same source file arrives as `Features/X.cs`
@@ -203,6 +204,14 @@ def merge_coverages(paths: list[Path] | tuple[Path, ...]) -> ET.Element:
     for dst_pkg in packages.findall("package"):
         c = v = bc = bv = 0
         for dst_cls in dst_pkg.findall("classes/class"):
+            # Per-method rates must be recomputed from the merged lines too.
+            # A method's surviving line-rate/branch-rate comes from the first
+            # file that declared it (often a test run where it was uncovered);
+            # after other runs contribute hits the stale 0 makes the CRAP
+            # consumer read a well-covered method as untested.
+            for method in dst_cls.findall("methods/method"):
+                method_lines = method.find("lines")
+                _set_rates(method, method_lines.findall("line") if method_lines is not None else [])
             cc, vv, cbc, vbv = _set_rates(dst_cls, _class_lines(dst_cls))
             c += cc
             v += vv
