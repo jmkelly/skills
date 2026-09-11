@@ -260,3 +260,26 @@ def test_main_fails_when_any_project_below_break(patched_two_projects, monkeypat
 def test_main_project_flag_ambiguous_with_two_projects(patched_two_projects, monkeypatch):
     with pytest.raises(SystemExit, match="ambiguous"):
         run_main(monkeypatch, "--project", "LibA/LibA.csproj")
+
+# ------------------------------------------------------- unpinnable projects
+
+def test_main_skips_unpinnable_project(tmp_path, monkeypatch):
+    make_projects(tmp_path, refs=("LibA", "LibB"))  # no config, two references
+    monkeypatch.setattr(ds, "REPO", tmp_path)
+    monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    called: list = []
+    monkeypatch.setattr(ds.subprocess, "run",
+                        lambda *a, **k: called.append(a) or subprocess.CompletedProcess([], 0))
+    assert run_main(monkeypatch) == 0
+    assert called == []
+    assert (tmp_path / "stryker-queue.md").exists()
+
+
+def test_below_break_exit_still_writes_queue(patched, monkeypatch):
+    # dotnet-stryker exits non-zero when below break; the audit must keep the
+    # report, write the queue, and let its own gate return 1 (not pass the raw
+    # exit code through before recording the survivors).
+    fake_subprocess(monkeypatch, {}, returncode=2)
+    write_report(patched, sample_mutation_report(survived=4, killed=1))  # 20% < 25
+    assert run_main(monkeypatch) == 1
+    assert "## Proj.Tests" in ds.QUEUE.read_text()

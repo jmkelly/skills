@@ -223,26 +223,44 @@ def main() -> int:
 
     env = {**os.environ, "DOTNET_ROLL_FORWARD": "LatestMajor"}  # testhost compat, same as the CRAP audit
     results: list[tuple[str, dict, float | None, dict]] = []
+    skipped: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         for test_project in projects:
             tdir = test_project.parent
             own_config = repo_config_for(test_project)
             if own_config is not None:
                 config_arg = str(own_config.resolve())
-            else:
+            elif args.project:
                 config_arg = str(default_config(choose_project_for(test_project, args.project), Path(tmp)))
+            else:
+                # No policy config and no unambiguous project under test: there
+                # is nothing to point Stryker at (e.g. an architecture-test
+                # project with zero references, or an integration suite that
+                # fans out over several). Skip it — a missing policy is not a
+                # build failure.
+                refs = referenced_projects(test_project)
+                if len(refs) != 1:
+                    skipped.append(test_project.stem)
+                    print(f"==> skipping {test_project.stem}: no stryker-config.json and "
+                          f"{len(refs)} project reference(s) to pin")
+                    continue
+                config_arg = str(default_config(refs[0], Path(tmp)))
             thresholds = thresholds_from(Path(config_arg))
 
             print(f"==> Mutation testing {test_project.stem}...")
             proc = subprocess.run([tool, "--config-file", config_arg, *extra], cwd=tdir, env=env)
-            if proc.returncode != 0:
-                return proc.returncode
-
             report = newest_json_report_for(test_project)
             if report is None:
                 print(f"error: no mutation-report.json found under {tdir}/StrykerOutput/",
                       file=sys.stderr)
-                return 2
+                return proc.returncode if proc.returncode != 0 else 2
+            if proc.returncode != 0:
+                # dotnet-stryker exits non-zero when the score is below
+                # `thresholds.break`. That is a gate result, not a tool failure:
+                # keep the report, run the remaining projects, and let the
+                # combined break gate below decide (and write the queue).
+                print(f"note: dotnet-stryker exited {proc.returncode}; keeping the report "
+                      "(below break, or a tool error that still produced one)")
             print(f"report: {report}")
             data = json.loads(report.read_text(encoding="utf-8"))
             results.append((test_project.stem, data, mutation_score(data), thresholds))
@@ -258,6 +276,12 @@ def main() -> int:
         print(f"stryker [{name}]: killed {killed}, survived {survived}, no coverage {no_coverage} "
               f"-> score {score_txt} (break-at {break_at:g}%)")
     print(f"queue: {QUEUE.name}")
+    if skipped:
+        print(f"skipped {len(skipped)} test project(s) without a pinnable project under test: "
+              f"{', '.join(skipped)}")
+    if not results:
+        print("==> no mutation-testable test project (every candidate was skipped)")
+        return 0
     if failing and not args.no_gate:
         print(f"==> FAIL: {len(failing)} project(s) below break ({', '.join(failing)}) (see {QUEUE})")
         return 1
