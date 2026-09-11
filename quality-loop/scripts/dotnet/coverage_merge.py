@@ -21,6 +21,21 @@ every class filename is canonicalized to its longest super-suffix variant
 merely share a basename (e.g. two `AssemblyInfo.cs`) never merge. Without
 this, unified classes split into covered + phantom-uncovered duplicates
 that inflate totals and fake CRAP/coverage offenders.
+
+Two post-merge steps make the file consumable by crap4dotnet, which
+attributes coverage to a source method **by method name only** (it cannot
+disambiguate overloads and has no entry at all for async/iterator state
+machines):
+
+  - state-machine classes (`DeclaringType/<Method>d__N`, from `async` /
+    `yield` bodies) are folded back into a synthetic method named
+    `<Method>` on the declaring class, carrying the state machine's lines;
+  - method entries with the same name in one class are collapsed into one
+    (lines unioned), because a duplicate name makes crap4dotnet attribute
+    neither overload.
+
+Synthetic entries are tagged `materialized="state-machine"` and excluded
+from class-rate recomputation so they never double-count a file's lines.
 """
 from __future__ import annotations
 
@@ -29,6 +44,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 CONDITION_RE = re.compile(r"\((\d+)/(\d+)\)")
+STATE_MACHINE_RE = re.compile(r"^(?P<decl>.+)/<(?P<method>[^>]+)>d__\d+$")
+MATERIALIZED_ATTR = "materialized"
+MATERIALIZED_VALUE = "state-machine"
 
 
 def _condition(text: str | None) -> tuple[int, int]:
@@ -135,13 +153,91 @@ def _merge_class(dst_pkg: ET.Element, src_cls: ET.Element) -> None:
 
 
 def _class_lines(dst_cls: ET.Element) -> list[ET.Element]:
-    """The lines a class contributes to rates: method lines, else class lines."""
+    """The lines a class contributes to rates: method lines, else class lines.
+
+    Materialized state-machine methods are excluded: their lines already
+    live in the state-machine class, so counting them again here would
+    double-count the file and break merge idempotence.
+    """
     method_lines = [ln for m in dst_cls.findall("methods/method")
+                    if m.get(MATERIALIZED_ATTR) != MATERIALIZED_VALUE
                     for ln in m.findall("lines/line")]
     if method_lines:
         return method_lines
     lines = dst_cls.find("lines")
     return lines.findall("line") if lines is not None else []
+
+
+def _materialize_method(dst_cls: ET.Element, name: str, src_lines: ET.Element) -> None:
+    """Add/merge a synthetic state-machine method `name` on the declaring class."""
+    methods = dst_cls.find("methods")
+    if methods is None:
+        methods = ET.SubElement(dst_cls, "methods")
+    target = next((m for m in methods.findall("method") if m.get("name") == name), None)
+    if target is None:
+        target = ET.SubElement(methods, "method")
+        target.set("name", name)
+        target.set("signature", "")
+        ET.SubElement(target, "lines")
+    target.set(MATERIALIZED_ATTR, MATERIALIZED_VALUE)
+    _merge_lines(_lines_el(target), src_lines)
+    _set_rates(target, _lines_el(target).findall("line"))
+
+
+def _materialize_state_machines(merged: ET.Element) -> None:
+    """Fold `DeclaringType/<Method>d__N` classes back onto their declaring type."""
+    for pkg in merged.findall("packages/package"):
+        classes = pkg.find("classes")
+        if classes is None:
+            continue
+        by_name = {c.get("name"): c for c in classes.findall("class")}
+        for cls in classes.findall("class"):
+            match = STATE_MACHINE_RE.match(cls.get("name") or "")
+            if match is None:
+                continue
+            decl = by_name.get(match.group("decl"))
+            if decl is None:
+                # The declaring type can be absent from the report when every
+                # one of its bodies is async/iterator (coverlet then emits only
+                # the state machine class). Re-create it so there is a place to
+                # hang the materialized method.
+                decl = ET.SubElement(classes, "class")
+                decl.set("name", match.group("decl"))
+                decl.set("filename", cls.get("filename") or "")
+                by_name[match.group("decl")] = decl
+            union = ET.Element("lines")
+            for method in cls.findall("methods/method"):
+                lines = method.find("lines")
+                if lines is not None:
+                    _merge_lines(union, lines)
+            if list(union):
+                _materialize_method(decl, match.group("method"), union)
+
+
+def _dedupe_methods_by_name(merged: ET.Element) -> None:
+    """Collapse same-named method entries in a class (crap4dotnet matches by name)."""
+    for pkg in merged.findall("packages/package"):
+        for cls in pkg.findall("classes/class"):
+            methods = cls.find("methods")
+            if methods is None:
+                continue
+            keep: dict[str, ET.Element] = {}
+            remove: list[ET.Element] = []
+            for method in methods.findall("method"):
+                name = method.get("name") or ""
+                if name not in keep:
+                    keep[name] = method
+                    continue
+                src = method.find("lines")
+                if src is not None:
+                    _merge_lines(_lines_el(keep[name]), src)
+                if method.get(MATERIALIZED_ATTR):
+                    keep[name].set(MATERIALIZED_ATTR, method.get(MATERIALIZED_ATTR))
+                remove.append(method)
+            for method in remove:
+                methods.remove(method)
+            for method in keep.values():
+                _set_rates(method, _lines_el(method).findall("line"))
 
 
 def _set_rates(el: ET.Element, lines: list[ET.Element]) -> tuple[int, int, int, int]:
@@ -235,6 +331,11 @@ def merge_coverages(paths: list[Path] | tuple[Path, ...]) -> ET.Element:
     merged.set("lines-valid", str(v))
     merged.set("branches-covered", str(bc))
     merged.set("branches-valid", str(bv))
+    # crap4dotnet reads method entries by name; make async state machines and
+    # overloaded methods matchable (see the module docstring). Rates above are
+    # already final — these steps only add/merge method entries.
+    _materialize_state_machines(merged)
+    _dedupe_methods_by_name(merged)
     return merged
 
 

@@ -135,7 +135,7 @@ def test_build_brief_includes_handoff(tmp_path):
 def test_build_brief_dotnet_batch_order(tmp_path):
     config = make_config(tmp_path, stack="dotnet", auds=ql.build_audits("dotnet"))
     brief = ql.build_brief(config, ["quality", "warnings", "stryker"])
-    assert "crap-queue.md, metrics-queue.md, warnings-queue.md, stryker-queue.md" in brief
+    assert "crap-queue.md, coverage-queue.md, metrics-queue.md, warnings-queue.md, stryker-queue.md" in brief
     assert "Stryker queue:" in brief
     assert "ExcludeFromCodeCoverage" in brief
     assert "NoWarn" in brief

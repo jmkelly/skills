@@ -121,3 +121,52 @@ def test_write_merged_declaration_and_roundtrip(tmp_path):
     text = out.read_text()
     assert text.startswith("<?xml")
     assert ET.parse(str(out)).getroot().tag == "coverage"
+
+
+# ------------------------------------------- crap4dotnet materialization
+
+def test_materializes_async_state_machine(tmp_path):
+    decl = class_xml("A", "a.cs", "")
+    sm = class_xml("A/&lt;M&gt;d__1", "a.cs", method_xml("MoveNext", line(10, 1) + line(11, 0)))
+    a = write(tmp_path, "a.xml", doc(pkg("Lib", decl + sm)))
+    merged = cm.merge_coverages([a])
+    cls = [c for c in merged.findall("packages/package/classes/class") if c.get("name") == "A"][0]
+    m = cls.find("methods/method")
+    assert m.get("name") == "M"
+    assert m.get("materialized") == "state-machine"
+    assert {ln.get("number") for ln in m.findall("lines/line")} == {"10", "11"}
+
+
+def test_materializes_creates_missing_declaring_class(tmp_path):
+    sm = class_xml("A/&lt;M&gt;d__1", "a.cs", method_xml("MoveNext", line(1, 1)))
+    a = write(tmp_path, "a.xml", doc(pkg("Lib", sm)))
+    merged = cm.merge_coverages([a])
+    names = {c.get("name") for c in merged.findall("packages/package/classes/class")}
+    assert "A" in names and "A/<M>d__1" in names
+
+
+def test_materialized_method_does_not_change_class_rate(tmp_path):
+    decl = class_xml("A", "a.cs", method_xml("N", line(1, 1)))
+    sm = class_xml("A/&lt;M&gt;d__1", "a.cs", method_xml("MoveNext", line(10, 0)))
+    a = write(tmp_path, "a.xml", doc(pkg("Lib", decl + sm)))
+    merged = cm.merge_coverages([a])
+    cls = [c for c in merged.findall("packages/package/classes/class") if c.get("name") == "A"][0]
+    assert cls.get("lines-valid") == "1"  # only N, not the materialized M
+
+
+def test_state_machine_merge_is_idempotent(tmp_path):
+    decl = class_xml("A", "a.cs", method_xml("N", line(1, 1)))
+    sm = class_xml("A/&lt;M&gt;d__1", "a.cs", method_xml("MoveNext", line(10, 1)))
+    a = write(tmp_path, "a.xml", doc(pkg("Lib", decl + sm)))
+    once = ET.tostring(cm.merge_coverages([a]))
+    merged_file = cm.write_merged([a], tmp_path / "m.xml")
+    assert ET.tostring(cm.merge_coverages([merged_file, a])) == once
+
+
+def test_dedupes_overloaded_methods(tmp_path):
+    methods = method_xml("M", line(1, 1)) + method_xml("M", line(2, 0))
+    a = write(tmp_path, "a.xml", doc(pkg("Lib", class_xml("A", "a.cs", methods))))
+    merged = cm.merge_coverages([a])
+    names = [m.get("name") for m in merged.findall("packages/package/classes/class/methods/method")]
+    assert names == ["M"]
+    assert set(lines_of(merged, "A")) == {"1", "2"}

@@ -157,3 +157,68 @@ def test_main_invalid_json_is_usage_error(tmp_path, monkeypatch):
 def test_main_missing_tool_returns_2(tmp_path, monkeypatch):
     monkeypatch.setattr(dm, "find_tool", lambda name: None)
     assert run_main(monkeypatch) == 2
+
+# ------------------------------------------------- synthesized raw-rule breaches
+
+def test_load_rules_maps_severities_and_skips_off(tmp_path):
+    cfg = tmp_path / ".dependably"
+    cfg.write_text(json.dumps({"codemetrics": {"rules": {
+        "lcom4": ["error", {"max": 4}],
+        "mi": ["warn", {"min": 20}],
+        "coupling": ["off", {"max": 20}],
+    }}}))
+    rules = dm.load_rules(cfg)
+    assert rules["lcom4"] == {"severity": "high", "options": {"max": 4}}
+    assert rules["mi"]["severity"] == "moderate"
+    assert "coupling" not in rules
+
+
+def test_load_rules_tolerates_missing_or_broken_config(tmp_path):
+    assert dm.load_rules(tmp_path / "missing") == {}
+    broken = tmp_path / "broken"
+    broken.write_text("{not json")
+    assert dm.load_rules(broken) == {}
+
+
+def test_synthesized_findings_cover_lcom4_coupling_nesting():
+    report = sample_report()
+    report["findings"] = []
+    report["extra"]["metrics"]["Types"] = [
+        {"Name": "Big", "Namespace": "N", "File": "Big.cs", "StartLine": 5, "Lcom4": 9, "InRepoCoupling": 25}]
+    report["extra"]["metrics"]["Methods"] = [
+        {"Type": "N.Big", "Name": "M", "File": "Big.cs", "StartLine": 5, "MaxNesting": 7,
+         "Cyclomatic": 3, "Cognitive": 3, "MaintainabilityIndex": 90}]
+    rules = {"lcom4": {"severity": "high", "options": {"max": 4}},
+             "coupling": {"severity": "high", "options": {"max": 20}},
+             "nesting": {"severity": "high", "options": {"max": 5}}}
+    got = dm.synthesized_findings(report, rules)
+    assert {f["ruleId"] for f in got} == {"lcom4", "coupling", "nesting"}
+    assert all(f["location"]["file"] == "Big.cs" for f in got)
+    assert all(f["severity"] == "high" for f in got)
+
+
+def test_collect_findings_dedupes_tool_and_synthesized():
+    report = sample_report()
+    rules = {"cyclomatic": {"severity": "high", "options": {"max": 25}}}
+    # sample_report already carries a cyclomatic finding at Bad/Service.cs:3,
+    # and its Handle method breaches the same rule at the same location.
+    got = dm.collect_findings(report, rules)
+    assert sum(1 for f in got if f["ruleId"] == "cyclomatic") == 1
+
+
+def test_main_surfaces_hidden_breaches(tmp_path, monkeypatch):
+    (tmp_path / ".dependably").write_text(json.dumps(
+        {"codemetrics": {"rules": {"lcom4": ["error", {"max": 4}]}}}))
+    monkeypatch.setattr(dm, "REPO", tmp_path)
+    monkeypatch.setattr(dm, "REPORT", tmp_path / "metrics-report.json")
+    monkeypatch.setattr(dm, "QUEUE", tmp_path / "metrics-queue.md")
+    report = sample_report()
+    report["findings"] = []
+    report["summary"]["findings"] = 0
+    report["summary"]["bySeverity"] = {s: 0 for s in dm.SEVERITIES}
+    report["extra"]["metrics"]["Types"] = [
+        {"Name": "Big", "Namespace": "N", "File": "Big.cs", "StartLine": 5, "Lcom4": 9}]
+    monkeypatch.setattr(dm.subprocess, "run", lambda *a, **k: fake_run(report, returncode=1))
+    assert run_main(monkeypatch) == 1
+    text = (tmp_path / "metrics-queue.md").read_text()
+    assert "`lcom4`" in text and "LCOM4 9" in text

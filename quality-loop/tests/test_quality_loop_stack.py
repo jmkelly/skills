@@ -101,8 +101,9 @@ def test_build_audits_dotnet_order_and_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(ql, "REPO", tmp_path)
     monkeypatch.setattr(ql, "LOOP_DIR", tmp_path)
     auds = ql.build_audits("dotnet")
-    assert list(auds) == ["quality", "metrics", "warnings", "stryker"]
+    assert list(auds) == ["quality", "coverage", "metrics", "warnings", "stryker"]
     assert auds["quality"][0] == tmp_path / "dotnet" / "audit.py"
+    assert auds["coverage"][0] == tmp_path / "dotnet" / "coverage-audit.py"
     assert auds["metrics"][0] == tmp_path / "dotnet" / "metrics-audit.py"
     assert auds["warnings"][0] == tmp_path / "dotnet" / "warnings-audit.py"
     assert auds["stryker"][0] == tmp_path / "dotnet" / "stryker-audit.py"

@@ -36,6 +36,39 @@ from pathlib import Path
 TOOL = "codemetrics"
 DEFAULT_CONFIG_NAME = ".dependably.default"
 
+# .dependably rule -> (metrics section, field, direction, human noun). codemetrics
+# counts a rule breach toward its gate exit code but (0.1.2) does not emit
+# lcom4/coupling/nesting breaches in the JSON `findings` array — it reports
+# `findings: 0` while exiting 1 with `GateBreaches: N`. These mappings let the
+# audit re-derive the same breaches from the raw per-method/per-type metrics so
+# the queue is never red-and-empty. `coupling` is the in-repo fan-out (the same
+# value the tool's `hub`/god-class diagnosis uses), not total class coupling.
+RULE_METRICS: dict[str, tuple[str, str, str]] = {
+    "cyclomatic": ("Methods", "Cyclomatic", "max"),
+    "cognitive": ("Methods", "Cognitive", "max"),
+    "nesting": ("Methods", "MaxNesting", "max"),
+    "mi": ("Methods", "MaintainabilityIndex", "min"),
+    "lcom4": ("Types", "Lcom4", "max"),
+    "coupling": ("Types", "InRepoCoupling", "max"),
+}
+
+RULE_TEXT: dict[str, tuple[str, str]] = {
+    "cyclomatic": ("Complex method: cyclomatic {value} (max {limit}) for {name}.",
+                   "Extract helper methods to reduce cyclomatic complexity."),
+    "cognitive": ("High cognitive complexity: {value} (max {limit}) for {name}.",
+                  "Extract helpers and flatten nested branching."),
+    "nesting": ("Deep nesting: {value} (max {limit}) for {name}.",
+                "Use guard clauses or extract nested logic."),
+    "mi": ("Low maintainability index: {value} (min {limit}) for {name}.",
+           "Split the method / reduce its complexity."),
+    "lcom4": ("Low cohesion: LCOM4 {value} (max {limit}) for {name}.",
+              "Split responsibilities into focused types."),
+    "coupling": ("High in-repo coupling: {value} (max {limit}) for {name}.",
+                 "Reduce fan-out; extract collaborators behind a narrow seam."),
+}
+
+SEVERITIES = ("critical", "high", "moderate", "low", "info")
+
 
 def git_root(start: Path) -> Path | None:
     try:
@@ -82,6 +115,90 @@ def gate_config() -> Path:
     return DEFAULT_CONFIG
 
 
+def severity_for(config_severity: str) -> str:
+    """Map a `.dependably` rule severity to the shared finding-severity scale."""
+    return {"error": "high", "warn": "moderate", "warning": "moderate"}.get(config_severity, "moderate")
+
+
+def load_rules(config: Path) -> dict[str, dict]:
+    """The enabled `.dependably` rules: name -> {severity, max|min}."""
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    rules = {}
+    for name, spec in (data.get("codemetrics", {}).get("rules", {}) or {}).items():
+        if not isinstance(spec, list) or len(spec) < 2 or spec[0] == "off":
+            continue
+        options = spec[1] if isinstance(spec[1], dict) else {}
+        rules[name] = {"severity": severity_for(str(spec[0])), "options": options}
+    return rules
+
+
+def entry_name(section: str, entry: dict) -> str:
+    if section == "Methods":
+        return f"{entry.get('Type')}.{entry.get('Name')}"
+    namespace = entry.get("Namespace") or ""
+    return f"{namespace}.{entry.get('Name')}" if namespace else (entry.get("Name") or "?")
+
+
+def synthesized_findings(data: dict, rules: dict[str, dict]) -> list[dict]:
+    """Rule breaches codemetrics gates on but omits from its `findings` array."""
+    metrics = data.get("extra", {}).get("metrics", {})
+    out = []
+    for rule, spec in rules.items():
+        mapping = RULE_METRICS.get(rule)
+        if mapping is None:
+            continue
+        section, field, direction = mapping
+        key = "max" if direction == "max" else "min"
+        limit = spec["options"].get(key)
+        if limit is None:
+            continue
+        template, remediation = RULE_TEXT[rule]
+        for entry in metrics.get(section) or []:
+            value = entry.get(field)
+            if value is None:
+                continue
+            breached = value > limit if direction == "max" else value < limit
+            if not breached:
+                continue
+            out.append({
+                "ruleId": rule,
+                "severity": spec["severity"],
+                "weight": abs(value - limit),
+                "location": {"file": entry.get("File") or "(unknown)", "line": entry.get("StartLine") or 1},
+                "message": template.format(value=value, limit=limit, name=entry_name(section, entry)),
+                "remediation": remediation,
+            })
+    return out
+
+
+def finding_key(finding: dict) -> tuple:
+    location = finding.get("location") or {}
+    return (finding.get("ruleId"), location.get("file"), location.get("line"))
+
+
+def collect_findings(data: dict, rules: dict[str, dict]) -> list[dict]:
+    """Tool findings plus synthesized rule breaches, deduplicated by rule+location."""
+    findings = list(data.get("findings") or [])
+    seen = {finding_key(f) for f in findings}
+    for finding in synthesized_findings(data, rules):
+        if finding_key(finding) not in seen:
+            findings.append(finding)
+            seen.add(finding_key(finding))
+    return findings
+
+
+def severity_counts(findings: list[dict]) -> dict[str, int]:
+    counts = {severity: 0 for severity in SEVERITIES}
+    for finding in findings:
+        severity = finding.get("severity")
+        if severity in counts:
+            counts[severity] += 1
+    return counts
+
+
 def queue_md(data: dict) -> str:
     metrics = data["extra"]["metrics"]
     methods = metrics["Methods"]
@@ -105,7 +222,7 @@ def queue_md(data: dict) -> str:
         "",
     ]
     severity_order = {"critical": 0, "high": 1, "moderate": 2, "low": 3}
-    for f in sorted(findings, key=lambda f: severity_order.get(f["severity"], 9)):
+    for f in sorted(findings, key=lambda f: (severity_order.get(f["severity"], 9), -f.get("weight", 0))):
         loc = f["location"]
         file = loc.get("file") or "(namespace level)"
         line = loc.get("line") or ""
@@ -154,6 +271,10 @@ def main() -> int:
         return 2
 
     REPORT.write_text(proc.stdout)
+    data["findings"] = collect_findings(data, load_rules(config))
+    data["summary"] = {**data["summary"],
+                       "findings": len(data["findings"]),
+                       "bySeverity": severity_counts(data["findings"])}
     QUEUE.write_text(queue_md(data))
 
     s = data["summary"]
