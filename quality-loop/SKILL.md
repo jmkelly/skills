@@ -21,11 +21,11 @@ is done only when every gate is **green** (the audit exits 0, the queue empty).
 |---|---|---|---|---|
 | .NET | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method (test projects excluded) | `crap-queue.md` |
 | .NET | coverage | `coverage-audit.py` (coverlet cobertura over authored code only) | **authored branch coverage ≥ floor** (`coverage-policy.json`, default 70%) | `coverage-queue.md` |
-| .NET | metrics | `Dependably.CodeMetrics` over Roslyn | `.dependably` rules (MI ≥ 20, cyclomatic ≤ 25, …) | `metrics-queue.md` |
+| .NET | metrics | `Dependably.CodeMetrics` over Roslyn | `.dependably` rules (MI ≥ 20, cyclomatic ≤ 15, cognitive ≤ 15, …) | `metrics-queue.md` |
 | .NET | warnings | `dotnet build --no-incremental` | **zero build warnings** (compiler/analyzer/NuGet/MSBuild) | `warnings-queue.md` |
 | .NET | mutation | `dotnet-stryker` | `thresholds.break` | `stryker-queue.md` |
 | Python | quality | radon cc × coverage.py per-function coverage (same CRAP formula) | **CRAP < 10** per function (tests/ excluded) | `crap-queue.md` |
-| Python | metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 25, args ≤ 7 | `metrics-queue.md` |
+| Python | metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 15, args ≤ 7 | `metrics-queue.md` |
 | Python | warnings | `pyflakes` | **zero findings** (unused imports, undefined names) | `warnings-queue.md` |
 
 Python has no mutation-testing gate yet (dotnet-stryker has no Python equivalent in
@@ -142,6 +142,16 @@ merges whatever files are present when they exist and otherwise runs
 - **Python**: `scripts/python/metrics-audit.py` (needs `pip install radon`) mirrors the
   `.dependably` rules by name and threshold; writes `metrics-report.json` +
   `metrics-queue.md` in the same shape.
+
+**Bundled default thresholds** are published/band-consistent, not the tool
+README example: cyclomatic ≤ 15 (NIST relaxed ceiling; McCabe is 10), cognitive
+≤ 15 (Sonar S3776 default), nesting ≤ 4 (ESLint `max-depth` default), MI ≥ 20
+(Microsoft green floor) and in-repo coupling ≤ 40 (the tool's high band). The raw
+`lcom4` rule is **off**: it has no statelessness guard, so a stateless class
+reports LCOM4 ≈ method count by construction — the tool's guard-aware
+`low-cohesion`/`god-class` diagnoses are the correct gate. `failOn` stays
+`high`; set `failOn.severity` to `moderate` to also gate the guarded
+`low-cohesion` (moderate) diagnosis (ADR-0040 in SpatialEngine does).
 
 ### Warnings audit (both stacks) — `scripts/dotnet/warnings-audit.py` or `scripts/python/warnings-audit.py`
 

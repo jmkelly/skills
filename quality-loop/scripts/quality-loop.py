@@ -217,7 +217,7 @@ def build_audits(stack: str) -> dict:
             "metrics": (
                 LOOP_DIR / "dotnet" / "metrics-audit.py",
                 "metrics-queue.md",
-                ".dependably metric rules (MI >= 20, cyclomatic <= 25, ...)",
+                ".dependably metric rules (MI >= 20, cyclomatic <= 15, cognitive <= 15, ...)",
                 (),
             ),
             "warnings": (
@@ -243,7 +243,7 @@ def build_audits(stack: str) -> dict:
         "metrics": (
             LOOP_DIR / "python" / "metrics-audit.py",
             "metrics-queue.md",
-            "radon rules (MI >= 20, cyclomatic <= 25, args <= 7)",
+            "radon rules (MI >= 20, cyclomatic <= 15, args <= 7)",
             (),
         ),
         "warnings": (

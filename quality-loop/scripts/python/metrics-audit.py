@@ -4,7 +4,8 @@ the .NET scripts/dotnet/metrics-audit.py (which runs Dependably.CodeMetrics
 over Roslyn with the `.dependably` rules).
 
 Rules (mirror the .NET gate; same rule names, same thresholds):
-  cyclomatic   error  max 25    (radon cyclomatic complexity per function)
+  cyclomatic   error  max 15    (radon cyclomatic complexity per function;
+                                 NIST relaxed ceiling — McCabe's own limit is 10)
   mi           error  min 20    (radon Maintainability Index per module —
                                  module-level, which is how radon computes MI;
                                  per-function slices are unreliable)
@@ -60,8 +61,8 @@ SKIPPED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules",
                 ".pytest_cache", "artifacts", "build", "dist", "site-packages"}
 
 RULES = {
-    "cyclomatic": {"severity": "high", "check": lambda cc: cc > 25,
-                   "message": lambda cc: f"cyclomatic complexity {cc} exceeds max 25",
+    "cyclomatic": {"severity": "high", "check": lambda cc: cc > 15,
+                   "message": lambda cc: f"cyclomatic complexity {cc} exceeds max 15",
                    "remediation": "extract methods / introduce guard clauses or table-driven dispatch"},
     "mi": {"severity": "high", "check": lambda mi: mi < 20,
            "message": lambda mi: f"maintainability index {mi:.1f} below min 20",

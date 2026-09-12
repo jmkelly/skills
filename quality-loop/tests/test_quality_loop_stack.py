@@ -124,7 +124,7 @@ def test_build_audits_python(tmp_path, monkeypatch):
     assert list(auds) == ["quality", "metrics", "warnings"]
     assert auds["quality"][0] == tmp_path / "python" / "audit.py"
     assert auds["quality"][1] == "crap-queue.md"
-    assert auds["metrics"][2] == "radon rules (MI >= 20, cyclomatic <= 25, args <= 7)"
+    assert auds["metrics"][2] == "radon rules (MI >= 20, cyclomatic <= 15, args <= 7)"
     assert auds["warnings"][0] == tmp_path / "python" / "warnings-audit.py"
     assert auds["warnings"][1] == "warnings-queue.md"
 

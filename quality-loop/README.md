@@ -51,7 +51,7 @@ Full semantics, exit codes, anti-gaming rules, and known-tooling notes:
 | Gate | Tool | Rule |
 |---|---|---|
 | quality | `crap4dotnet` (CRAP = complexity² × (1 − coverage) + complexity) | **CRAP < 10** per method, test project excluded |
-| metrics | `Dependably.CodeMetrics` (Roslyn) | `.dependably` rules: MI ≥ 20, cyclomatic ≤ 25, … |
+| metrics | `Dependably.CodeMetrics` (Roslyn) | `.dependably` rules: MI ≥ 20, cyclomatic ≤ 15, cognitive ≤ 15, … |
 | warnings | `dotnet build --no-incremental` | **zero build warnings** (CS/analyzer/NU/MSB) |
 | mutation | `dotnet-stryker` | `thresholds.break` |
 
@@ -113,7 +113,7 @@ python3 scripts/dotnet/stryker-audit.py
 | Gate | Tool | Rule |
 |---|---|---|
 | quality | radon cc × coverage.py (same CRAP formula, per-function) | **CRAP < 10** per function, `tests/` excluded |
-| metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 25, args ≤ 7 |
+| metrics | radon (module MI, function cc, arg count) | MI ≥ 20, cc ≤ 15, args ≤ 7 |
 | warnings | `pyflakes` | **zero findings** (unused imports, undefined names) |
 
 Python has **no mutation gate yet** (no Stryker equivalent in this skill) —
