@@ -33,7 +33,8 @@ Each iteration:
      iterations where quality, metrics AND warnings pass, so an iteration
      never pays the Stryker cost while a cheaper gate is already failing.
      Each audit gates on its own rules and writes its own work queue.
-  2. If any gate failed: IMPLEMENTOR — a headless pi session fixes the worst
+  2. If any gate failed: IMPLEMENTOR — a headless implementor session
+     (pi -p or opencode run, per --harness / QUALITY_HARNESS) fixes the worst
      `batch-size` offenders across the failing queues. **Each pass starts a
      fresh session**; past session files accumulate in the session dir for
      forensics or takeover. A one-paragraph handoff summary is carried from
@@ -49,20 +50,30 @@ Audits are deterministic — same source, tool version, and config ⇒ same
 result; pin tool versions (see SKILL.md Notes). A skipped audit
 (--skip) counts as passing for prerequisite ordering.
 
-Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run]
+Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--harness pi|opencode]
 
   --dry-run   run the audit phase and print the implementor brief without
-              launching a pi session (no fixes are made)
+              launching an implementor session (no fixes are made)
+  --harness   which agent harness launches the implementor passes: `pi`
+              (default, `pi -p` with a per-run session dir) or `opencode`
+              (`opencode run --title quality-implementor`, fresh session per
+              pass; the handoff file carries context between passes either way)
 
-This driver is packaged as part of the quality-loop pi skill (skill root =
+This driver is packaged as part of the quality-loop skill (skill root =
 the directory containing SKILL.md); it can be run directly with python3
 from anywhere inside the repo (it locates the repo root via git) or the agent
-runs it when following the skill.
+runs it when following the skill. It is installed for both harnesses: the pi
+skill at ~/.pi/agent/skills/quality-loop and the opencode skill at
+~/.config/opencode/skills/quality-loop are the same source tree.
 
 Environment (QUALITY_* names):
-  QUALITY_MODEL         model for the implementor pi call (default: pi's default)
-  QUALITY_SESSION_DIR   implementor session dir (default: ~/.pi/sessions/quality-implementor)
-  QUALITY_PI_APPROVE    "0" to skip -a (project-local file approval) on pi calls
+  QUALITY_HARNESS     implementor harness: pi|opencode (default: pi; --harness wins)
+  QUALITY_MODEL       model for the implementor call (default: harness default)
+  QUALITY_AGENT       opencode agent for the implementor call (--agent; pi ignores it)
+  QUALITY_SESSION_DIR implementor session dir (default: per-harness base below)
+  QUALITY_APPROVE     "0" to skip approval on implementor calls (generic; QUALITY_PI_APPROVE
+                      is the legacy pi-specific spelling and still honored)
+  QUALITY_PI_APPROVE  "0" to skip -a (project-local file approval) on pi calls
 """
 from __future__ import annotations
 
@@ -161,6 +172,20 @@ class ImplementorConfig:
     model: str
     approve: bool
     auds: dict
+    harness: str = "pi"
+    agent: str = ""
+
+
+HARNESSES = ("pi", "opencode")
+
+
+def resolve_harness(cli_value: str | None) -> str:
+    """Which harness launches implementor passes: explicit --harness wins,
+    then QUALITY_HARNESS, then pi (the historical behavior)."""
+    name = (cli_value or os.environ.get("QUALITY_HARNESS") or "pi").lower()
+    if name not in HARNESSES:
+        raise SystemExit(f"ERROR: unknown harness {name!r} (available: {', '.join(HARNESSES)})")
+    return name
 
 
 def dotnet_marker(repo: Path) -> bool:
@@ -276,7 +301,19 @@ def require_enabled(enabled: list[str]) -> list[str]:
     return enabled
 
 
-def session_dir_from_env() -> Path:
+def default_session_base(harness: str) -> Path:
+    """Per-harness home for per-run implementor session dirs (handoff state).
+
+    pi sessions live as JSONL under ~/.pi; opencode owns its sessions
+    server-side, so the opencode base only holds the loop's handoff file —
+    it follows XDG state (~/.local/share) rather than opencode's config dir.
+    """
+    if harness == "opencode":
+        return Path.home() / ".local" / "share" / "opencode" / "sessions" / "quality-implementor"
+    return Path.home() / ".pi" / "sessions" / "quality-implementor"
+
+
+def session_dir_from_env(harness: str = "pi") -> Path:
     """Implementor session dir.
 
     QUALITY_SESSION_DIR, when set, is the exact dir (escape hatch for CI and
@@ -292,7 +329,7 @@ def session_dir_from_env() -> Path:
         return Path(override)
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", REPO.name).strip("-") or "repo"
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return Path.home() / ".pi" / "sessions" / "quality-implementor" / f"{slug}-{stamp}"
+    return default_session_base(harness) / f"{slug}-{stamp}"
 
 
 def wrap_previous(prev: str) -> str:
@@ -342,12 +379,50 @@ def build_pi_command(config: ImplementorConfig, brief: str) -> list[str]:
     return cmd
 
 
+def build_opencode_command(config: ImplementorConfig, brief: str) -> list[str]:
+    """Headless implementor pass via `opencode run`.
+
+    Each invocation without --session starts a fresh session (matching pi's
+    fresh-session-per-pass), titled so it is recognizable in `opencode session
+    list`; --auto is the analogue of pi's -a project-file approval.
+    """
+    cmd = ["opencode", "run"]
+    cmd += model_arg(config.model)
+    if config.agent:
+        cmd += ["--agent", config.agent]
+    if config.approve:
+        cmd += ["--auto"]
+    cmd += ["--title", "quality-implementor", brief]
+    return cmd
+
+
+def build_harness_command(config: ImplementorConfig, brief: str) -> list[str]:
+    if config.harness == "opencode":
+        return build_opencode_command(config, brief)
+    return build_pi_command(config, brief)
+
+
 def run_pi(cmd: list[str]) -> None:
     try:
         subprocess.run(cmd, cwd=REPO, check=False)
     except FileNotFoundError:
         raise SystemExit("ERROR: 'pi' not found on PATH — is pi installed?\n"
                          "       Run the loop from an environment where `pi` is available (e.g. via mise shims).")
+
+
+def run_opencode(cmd: list[str]) -> None:
+    try:
+        subprocess.run(cmd, cwd=REPO, check=False)
+    except FileNotFoundError:
+        raise SystemExit("ERROR: 'opencode' not found on PATH — is opencode installed?\n"
+                         "       Run the loop from an environment where `opencode` is available (e.g. via mise shims).")
+
+
+def run_harness(config: ImplementorConfig, cmd: list[str]) -> None:
+    if config.harness == "opencode":
+        run_opencode(cmd)
+    else:
+        run_pi(cmd)
 
 
 def note_missing_handoff(session_dir: Path) -> None:
@@ -357,8 +432,8 @@ def note_missing_handoff(session_dir: Path) -> None:
 
 
 def launch(config: ImplementorConfig, cmd: list[str]) -> None:
-    print(f"    pi command: {' '.join(cmd)}")
-    run_pi(cmd)
+    print(f"    {config.harness} command: {' '.join(cmd)}")
+    run_harness(config, cmd)
     note_missing_handoff(config.session_dir)
 
 
@@ -369,6 +444,28 @@ def print_dry_run(brief: str) -> None:
 
 def queue_order_names(auds: dict) -> str:
     return ", ".join(auds[name][1] for name in auds)
+
+
+def session_note(config: ImplementorConfig) -> str:
+    """How this pass relates to previous passes (per harness).
+
+    pi keeps past sessions as JSONL in the session dir; opencode owns its
+    sessions server-side, so the handoff summary is the pass's only memory.
+    Either way the regenerated queues are the source of truth.
+    """
+    if config.harness == "opencode":
+        return (
+            "This is a fresh session: the handoff summary above is your only "
+            "memory of previous passes, but the queues are regenerated by each audit and list only items still "
+            "failing — trust them as the source of truth. The handoff summary above tells you what the "
+            "previous pass did; don't redo finished work."
+        )
+    return (
+        "This is a fresh session: previous passes' sessions (JSONL files) are in the session dir "
+        "if you want to see what was already attempted, but the queues are regenerated by each audit "
+        "and list only items still failing — trust them as the source of truth. "
+        "The handoff summary above tells you what the previous pass did; don't redo finished work."
+    )
 
 
 def build_brief(config: ImplementorConfig, failed: list[str]) -> str:
@@ -386,11 +483,7 @@ def build_brief(config: ImplementorConfig, failed: list[str]) -> str:
    {data_files}.
 2. Refactor the worst {config.batch} offenders this pass, worst-first across the failing queues in this order:
    {queue_order_names(config.auds)}
-   (never skip a queue entirely if it has offenders and your batch isn't spent). This is a fresh
-   session: previous passes' sessions (JSONL files) are in the session dir if you want to see what
-   was already attempted, but the queues are regenerated by each audit and list only items still
-   failing — trust them as the source of truth. The handoff summary above tells you what the
-   previous pass did; don't redo finished work.
+   (never skip a queue entirely if it has offenders and your batch isn't spent). {session_note(config)}
 3. Per-suite guidance:
 {chr(10).join(lines)}
 4. Keep behavior identical; keep the build green and run targeted tests after each change.
@@ -407,7 +500,7 @@ def run_implementor(config: ImplementorConfig, failed: list[str], dry_run: bool 
     if dry_run:
         print_dry_run(brief)
         return
-    launch(config, build_pi_command(config, brief))
+    launch(config, build_harness_command(config, brief))
 
 
 def blocking_prereqs(prereqs: tuple, failed: list[str]) -> list[str]:
@@ -456,8 +549,12 @@ def queue_paths(enabled: list[str], auds: dict) -> str:
     return ", ".join(str(REPO / auds[name][1]) for name in enabled)
 
 
-def print_exhausted(enabled: list[str], auds: dict, session_dir: Path, max_iterations: int) -> None:
-    if any(session_dir.glob("*.jsonl")):
+def print_exhausted(enabled: list[str], auds: dict, session_dir: Path, max_iterations: int,
+                     harness: str = "pi") -> None:
+    if harness == "opencode":
+        # Opencode owns sessions server-side; the handoff file is the takeover artifact.
+        print(f"==> Implementor handoff kept at: {session_dir / HANDOFF_FILE}")
+    elif any(session_dir.glob("*.jsonl")):
         print(f"==> Implementor sessions kept at: {session_dir}")
         print(f"    Take over the most recent pass with: pi -c --session-dir {session_dir}")
     print(f"==> Max iterations ({max_iterations}) reached without passing every gate.")
@@ -469,7 +566,7 @@ def exit_after(results: list[bool], enabled: list[str], config: ImplementorConfi
     if passed_last(results):
         print_all_clean(enabled, config.auds)
         return 0
-    print_exhausted(enabled, config.auds, config.session_dir, max_iterations)
+    print_exhausted(enabled, config.auds, config.session_dir, max_iterations, config.harness)
     return 1
 
 
@@ -496,7 +593,7 @@ def iteration(i: int, enabled: list[str], config: ImplementorConfig,
         return True
 
     print("\n" + "=" * 64)
-    print(f"Iteration {i}/{args.max_iterations} — IMPLEMENTOR (pi, batch of {config.batch})")
+    print(f"Iteration {i}/{args.max_iterations} — IMPLEMENTOR ({config.harness}, batch of {config.batch})")
     print(f"    failing suites: {', '.join(failed)}")
     print_skipped(skipped)
     print("=" * 64)
@@ -527,13 +624,17 @@ def run_loop(enabled: list[str], config: ImplementorConfig, args: argparse.Names
 
 
 def build_config(args: argparse.Namespace, stack: str, auds: dict) -> ImplementorConfig:
+    harness = resolve_harness(getattr(args, "harness", None))
+    approve = os.environ.get("QUALITY_APPROVE", os.environ.get("QUALITY_PI_APPROVE", "1")) != "0"
     return ImplementorConfig(
         stack=stack,
         batch=args.batch_size,
-        session_dir=session_dir_from_env(),
+        session_dir=session_dir_from_env(harness),
         model=os.environ.get("QUALITY_MODEL", ""),
-        approve=os.environ.get("QUALITY_PI_APPROVE", "1") != "0",
+        approve=approve,
         auds=auds,
+        harness=harness,
+        agent=os.environ.get("QUALITY_AGENT", ""),
     )
 
 
@@ -544,7 +645,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip", action="append", default=[], help="skip an audit (can be repeated): quality|coverage|metrics|warnings[|stryker]"
     )
-    parser.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip pi")
+    parser.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip implementor")
+    parser.add_argument("--harness", choices=["pi", "opencode"], default=None,
+                        help="implementor harness (default: QUALITY_HARNESS or pi)")
     return parser.parse_args()
 
 

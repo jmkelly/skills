@@ -3,7 +3,7 @@
 Deterministic quality gates for **.NET** and **Python** repositories — CRAP < 10,
 metrics (radon / Dependably.CodeMetrics), zero build warnings, Stryker mutation testing — plus a
 two-agent loop that drives the gates green. Distributed as a skill for the
-**pi** LLM harness, but every script runs standalone from the CLI.
+**pi** and **opencode** harnesses, but every script runs standalone from the CLI.
 
 ## What this is, for a maintainer
 
@@ -156,21 +156,31 @@ schema/shape as the .NET audits — `jq` queries work unchanged across stacks
 
 ---
 
-## Using it from the pi harness
+## Using it from pi / opencode
 
-This is installed as a **pi skill** at `~/.pi/agent/skills/quality-loop/`, so
-pi loads it automatically when a task matches its description (audits, queues,
-CRAP, Stryker, verifier/implementor work):
+The skill source at `~/Work/skills/quality-loop/` is installed for **both**
+harnesses (same tree, so fixes land everywhere at once):
+
+- **pi**: `~/.pi/agent/skills/quality-loop/` — pi loads it automatically when
+  a task matches its description (audits, queues, CRAP, Stryker,
+  verifier/implementor work).
+- **opencode**: `~/.config/opencode/skills/quality-loop/` (symlink to the
+  source tree) — opencode discovers it as a global skill; mention
+  `@quality-loop` or ask to *"run the quality loop for this repo"*.
 
 - **One-shot**: ask your agent to *"run the quality loop for this repo"* — it
   reads `SKILL.md`, runs the audits for the detected stack, and drives the
   fixes. Or ask for a single audit: *"run the CRAP audit"*.
 - **Automated loop**: `scripts/quality-loop.py [max-iterations] [batch-size]
-  [--skip <audit> ...] [--dry-run]` — headless implementor passes via `pi -p`
-  (fresh session per pass, unique session dir per run, one-paragraph handoff
-  between passes). `--dry-run` audits and prints the implementor brief without
-  launching pi. Env overrides: `QUALITY_MODEL`, `QUALITY_SESSION_DIR`,
-  `QUALITY_PI_APPROVE=0`.
+  [--skip <audit> ...] [--dry-run] [--harness pi|opencode]` — headless
+  implementor passes via `pi -p` (fresh session per pass, unique session dir
+  per run, one-paragraph handoff between passes) or `opencode run --title
+  quality-implementor` (fresh session per pass, handoff under
+  `~/.local/share/opencode/sessions/quality-implementor/`). `--dry-run`
+  audits and prints the implementor brief without launching either harness.
+  Env overrides: `QUALITY_HARNESS`, `QUALITY_MODEL`, `QUALITY_AGENT`
+  (opencode `--agent`), `QUALITY_SESSION_DIR`, `QUALITY_APPROVE=0`
+  (`QUALITY_PI_APPROVE=0` is the legacy pi-specific spelling).
 - **Manual two-agent pass**: the verifier (never edits code) runs every audit,
   diagnoses each offender near `file:line`, and records fix recommendations in
   the queues; the implementor fixes worst-first and keeps the build green.
@@ -180,7 +190,7 @@ CRAP, Stryker, verifier/implementor work):
   there. Works standalone too, from any directory inside the repo:
 
 ```bash
-python3 ~/.pi/agent/skills/quality-loop/scripts/quality-loop.py --dry-run
+python3 ~/.config/opencode/skills/quality-loop/scripts/quality-loop.py --dry-run --harness opencode
 ```
 
 ## Developing / testing
