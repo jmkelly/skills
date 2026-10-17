@@ -27,10 +27,12 @@ Usage: metrics-audit.py [--no-gate]
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 TOOL = "codemetrics"
@@ -68,6 +70,7 @@ RULE_TEXT: dict[str, tuple[str, str]] = {
 }
 
 SEVERITIES = ("critical", "high", "moderate", "low", "info")
+SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
 
 def git_root(start: Path) -> Path | None:
@@ -120,12 +123,16 @@ def severity_for(config_severity: str) -> str:
     return {"error": "high", "warn": "moderate", "warning": "moderate"}.get(config_severity, "moderate")
 
 
-def load_rules(config: Path) -> dict[str, dict]:
-    """The enabled `.dependably` rules: name -> {severity, max|min}."""
+def load_config(config: Path) -> dict:
     try:
-        data = json.loads(config.read_text(encoding="utf-8"))
+        return json.loads(config.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def load_rules(config: Path) -> dict[str, dict]:
+    """The enabled `.dependably` rules: name -> {severity, max|min}."""
+    data = load_config(config)
     rules = {}
     for name, spec in (data.get("codemetrics", {}).get("rules", {}) or {}).items():
         if not isinstance(spec, list) or len(spec) < 2 or spec[0] == "off":
@@ -133,6 +140,32 @@ def load_rules(config: Path) -> dict[str, dict]:
         options = spec[1] if isinstance(spec[1], dict) else {}
         rules[name] = {"severity": severity_for(str(spec[0])), "options": options}
     return rules
+
+
+def load_exceptions(config: Path) -> list[dict]:
+    """The `.dependably` grandfathered exceptions that are still in force.
+
+    The tool itself only accepts exceptions for its six metric rules (a
+    namespace-level `architectural-rigidity` diagnosis cannot be excepted);
+    entries for unknown rules are therefore ignored here exactly as the tool
+    ignores them. An expired entry no longer suppresses anything.
+    """
+    data = load_config(config)
+    entries = (data.get("codemetrics", {}) or {}).get("exceptions", []) or []
+    today = datetime.date.today()
+    active = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("rule") not in RULE_METRICS:
+            continue
+        expires = entry.get("expires")
+        if expires:
+            try:
+                if datetime.date.fromisoformat(str(expires)) < today:
+                    continue
+            except ValueError:
+                continue
+        active.append(entry)
+    return active
 
 
 def entry_name(section: str, entry: dict) -> str:
@@ -167,6 +200,7 @@ def synthesized_findings(data: dict, rules: dict[str, dict]) -> list[dict]:
                 "ruleId": rule,
                 "severity": spec["severity"],
                 "weight": abs(value - limit),
+                "_symbol": entry_name(section, entry),
                 "location": {"file": entry.get("File") or "(unknown)", "line": entry.get("StartLine") or 1},
                 "message": template.format(value=value, limit=limit, name=entry_name(section, entry)),
                 "remediation": remediation,
@@ -179,8 +213,116 @@ def finding_key(finding: dict) -> tuple:
     return (finding.get("ruleId"), location.get("file"), location.get("line"))
 
 
+def normalize_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
+
+
+def symbols_match(entry: dict, symbol: str, file: str) -> bool:
+    """Selector match for a `.dependably` exception: `path` (suffix, repo-relative)
+    and `symbol` (fully-qualified type name or its simple name). Any selector may
+    be omitted; a supplied selector must match."""
+    path = entry.get("path")
+    if path and not normalize_path(file).endswith(normalize_path(str(path))):
+        return False
+    selector = entry.get("symbol")
+    if selector:
+        selector = str(selector)
+        if symbol != selector and not symbol.endswith("." + selector):
+            return False
+    return True
+
+
+def stripped_config(config: Path, workdir: Path) -> Path:
+    """The gate config minus `exceptions`, in a temp file (same directory every
+    run so results stay reproducible). codemetrics' own JSON omits lcom4/
+    coupling/nesting breaches, so only an unexcepted scan exposes them."""
+    data = load_config(config)
+    codemetrics = data.get("codemetrics")
+    if isinstance(codemetrics, dict):
+        codemetrics.pop("exceptions", None)
+    path = workdir / (config.stem + ".no-exceptions.json")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def apply_exceptions(
+    findings: list[dict], exceptions: list[dict], limits: dict[str, float]
+) -> tuple[list[dict], list[dict]]:
+    """Split findings into (open, accepted) using the repo's grandfathered
+    exceptions. Each exception only absorbs a breach of the same rule whose
+    excess over the limit is no larger than the excepted symbol's own excess
+    (so an exception can't silently swallow a worse offender), and whose
+    `path`/`symbol` selectors match the finding."""
+    remaining = list(findings)
+    accepted = []
+    for entry in exceptions:
+        rule = str(entry.get("rule") or "")
+        if rule not in limits:
+            continue
+        symbol = str(entry.get("symbol") or "")
+        # The excepted symbol's own excess, from the synthesized finding it
+        # would have produced (weight = |value - limit|).
+        excess = next(
+            (
+                finding.get("weight")
+                for finding in findings
+                if finding.get("ruleId") == rule and finding.get("_symbol") == symbol
+            ),
+            None,
+        )
+        match = next(
+            (
+                finding
+                for finding in remaining
+                if finding.get("ruleId") == rule
+                and symbols_match(
+                    entry,
+                    str(finding.get("_symbol") or ""),
+                    str((finding.get("location") or {}).get("file") or ""),
+                )
+                and (excess is None or finding.get("weight") is None or finding["weight"] <= excess)
+            ),
+            None,
+        )
+        if match is not None:
+            remaining.remove(match)
+            accepted.append(match)
+    return remaining, accepted
+
+
+def rule_limits(rules: dict[str, dict]) -> dict[str, float]:
+    return {
+        name: spec["options"]["max" if RULE_METRICS[name][2] == "max" else "min"]
+        for name, spec in rules.items()
+        if name in RULE_METRICS
+        and spec["options"].get("max" if RULE_METRICS[name][2] == "max" else "min") is not None
+    }
+
+
+def load_fail_on(config: Path) -> str:
+    data = load_config(config)
+    spec = (data.get("codemetrics", {}) or {}).get("failOn") or {}
+    severity = str(spec.get("severity") or "high")
+    return severity if severity in SEVERITY_RANK else "high"
+
+
+def gate_relevant(findings: list[dict], fail_on: str) -> list[dict]:
+    """Only findings at or above the failOn severity gate (and therefore belong
+    in the queue). A synthesized breach below it is accepted policy — the tool
+    exits 0 for it — so listing it as an offender leaves the loop red with no
+    actionable work."""
+    threshold = SEVERITY_RANK[fail_on]
+    return [
+        finding
+        for finding in findings
+        if SEVERITY_RANK.get(str(finding.get("severity")), SEVERITY_RANK["high"]) <= threshold
+    ]
+
+
 def collect_findings(data: dict, rules: dict[str, dict]) -> list[dict]:
-    """Tool findings plus synthesized rule breaches, deduplicated by rule+location."""
+    """Tool findings plus synthesized rule breaches, deduplicated by rule+location.
+    Synthesized entries carry a private `_symbol` for exception matching; it is
+    stripped before the queue/report are written."""
     findings = list(data.get("findings") or [])
     seen = {finding_key(f) for f in findings}
     for finding in synthesized_findings(data, rules):
@@ -203,12 +345,13 @@ def queue_md(data: dict) -> str:
     metrics = data["extra"]["metrics"]
     methods = metrics["Methods"]
     findings = data["findings"]
+    accepted = data.get("accepted") or []
     s = metrics["Summary"]
 
     lines = [
         "# Metrics queue (worst offenders, worst-first)",
         "",
-        f"Generated by `{TOOL}` (schema v{data['schemaVersion']}) at {data['extra']['Meta']['ToolVersion']}",
+        f"Generated by `{TOOL}` (schema v{data['schemaVersion']}) at `{data['extra']['Meta']['ToolVersion']}`",
         f"Target: `{data['target']}` — {s['Files']} files, {s['Types']} types, {s['Methods']} methods, {s['TotalSloc']} SLOC",
         "",
         f"Summary: avg cyclomatic {s['AverageCyclomatic']}, avg cognitive {s['AverageCognitive']}, "
@@ -228,6 +371,13 @@ def queue_md(data: dict) -> str:
         line = loc.get("line") or ""
         lines.append(f"- **{f['severity']}** `{f['ruleId']}` [{file}:{line}] {f['message']}")
         lines.append(f"  - Fix: {f['remediation']}")
+    if accepted:
+        lines += ["", "## Accepted (grandfathered by `.dependably` exceptions)", ""]
+        for f in accepted:
+            loc = f["location"]
+            file = loc.get("file") or "(namespace level)"
+            line = loc.get("line") or ""
+            lines.append(f"- `{f['ruleId']}` [{file}:{line}] {f['message']}")
     lines += ["", "## Lowest maintainability index (methods)", ""]
     for m in sorted(methods, key=lambda m: m["MaintainabilityIndex"])[:15]:
         lines.append(
@@ -271,15 +421,45 @@ def main() -> int:
         return 2
 
     REPORT.write_text(proc.stdout)
-    data["findings"] = collect_findings(data, load_rules(config))
+    rules = load_rules(config)
+    exceptions = load_exceptions(config)
+    raw = data
+    if exceptions:
+        # codemetrics suppresses excepted breaches from its JSON but does not
+        # say which; an unexcepted scan recovers them so they can be matched
+        # against the selectors and listed as accepted instead of as work.
+        with tempfile.TemporaryDirectory(prefix="codemetrics-") as tmp:
+            bare = stripped_config(config, Path(tmp))
+            bare_proc = subprocess.run(
+                [tool, str(REPO), "--format", "json", "--config", str(bare)],
+                capture_output=True, text=True, cwd=REPO,
+            )
+        if bare_proc.returncode in (0, 1):
+            try:
+                raw = json.loads(bare_proc.stdout)
+            except json.JSONDecodeError:
+                raw = data
+        else:
+            print(bare_proc.stderr, file=sys.stderr)
+
+    findings = collect_findings(raw, rules)
+    open_findings, accepted = apply_exceptions(
+        findings, exceptions, rule_limits(rules)
+    )
+    open_findings = gate_relevant(open_findings, load_fail_on(config))
+    for finding in open_findings + accepted:
+        finding.pop("_symbol", None)
+    data["findings"] = open_findings
+    data["accepted"] = accepted
     data["summary"] = {**data["summary"],
-                       "findings": len(data["findings"]),
-                       "bySeverity": severity_counts(data["findings"])}
+                       "findings": len(open_findings),
+                       "bySeverity": severity_counts(open_findings)}
     QUEUE.write_text(queue_md(data))
 
     s = data["summary"]
     print(f"codemetrics: {s['scanned']} files scanned, {s['findings']} findings "
-          f"(high+ {s['bySeverity']['high'] + s['bySeverity']['critical']}), gate exit = {proc.returncode}")
+          f"(high+ {s['bySeverity']['high'] + s['bySeverity']['critical']}), "
+          f"{len(accepted)} accepted, gate exit = {proc.returncode}")
     print(f"config: {config.name}")
     print(f"reports: {REPORT.name}, {QUEUE.name}")
     return 0 if args.no_gate else proc.returncode
