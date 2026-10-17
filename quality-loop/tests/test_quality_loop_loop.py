@@ -231,6 +231,7 @@ def test_build_config_env_connected(monkeypatch, tmp_path):
 
 
 def test_build_config_default_approve(monkeypatch):
+    monkeypatch.delenv("QUALITY_APPROVE", raising=False)
     monkeypatch.delenv("QUALITY_PI_APPROVE", raising=False)
     monkeypatch.delenv("QUALITY_MODEL", raising=False)
     config = ql.build_config(Namespace(batch_size=1), "dotnet", {})
@@ -272,4 +273,6 @@ def test_main_runs_loop(monkeypatch, tmp_path, capsys):
     assert ql.main() == 7
     assert seen == [("detect", ql.REPO)]
     assert (tmp_path / "sessions").is_dir()
-    assert "Detected stack: python (quality audits enabled; repo" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Detected stack: python (quality audits enabled; repo" in out
+    assert "Implementor harness:" in out

@@ -158,7 +158,7 @@ schema/shape as the .NET audits — `jq` queries work unchanged across stacks
 
 ## Using it from pi / opencode
 
-The skill source at `~/Work/skills/quality-loop/` is installed for **both**
+The skill source at `~/Projects/skills/quality-loop/` is installed for **both**
 harnesses (same tree, so fixes land everywhere at once):
 
 - **pi**: `~/.pi/agent/skills/quality-loop/` — pi loads it automatically when
@@ -172,15 +172,18 @@ harnesses (same tree, so fixes land everywhere at once):
   reads `SKILL.md`, runs the audits for the detected stack, and drives the
   fixes. Or ask for a single audit: *"run the CRAP audit"*.
 - **Automated loop**: `scripts/quality-loop.py [max-iterations] [batch-size]
-  [--skip <audit> ...] [--dry-run] [--harness pi|opencode]` — headless
+  [--skip <audit> ...] [--dry-run] [--harness auto|pi|opencode]` — headless
   implementor passes via `pi -p` (fresh session per pass, unique session dir
   per run, one-paragraph handoff between passes) or `opencode run --title
   quality-implementor` (fresh session per pass, handoff under
-  `~/.local/share/opencode/sessions/quality-implementor/`). `--dry-run`
-  audits and prints the implementor brief without launching either harness.
-  Env overrides: `QUALITY_HARNESS`, `QUALITY_MODEL`, `QUALITY_AGENT`
-  (opencode `--agent`), `QUALITY_SESSION_DIR`, `QUALITY_APPROVE=0`
-  (`QUALITY_PI_APPROVE=0` is the legacy pi-specific spelling).
+  `~/.local/share/opencode/sessions/quality-implementor/`). `--harness auto`
+  (the default) follows the harness that launched the loop via its `AI_AGENT`
+  process marker, then the first of `pi`/`opencode` on `PATH`. `--dry-run`
+  audits and prints the resolved harness and implementor brief without
+  launching either harness. Env overrides: `QUALITY_HARNESS`, `QUALITY_MODEL`,
+  `QUALITY_AGENT` (opencode `--agent`), `QUALITY_SESSION_DIR`,
+  `QUALITY_APPROVE=0` (`QUALITY_PI_APPROVE=0` is the legacy pi-specific
+  spelling).
 - **Manual two-agent pass**: the verifier (never edits code) runs every audit,
   diagnoses each offender near `file:line`, and records fix recommendations in
   the queues; the implementor fixes worst-first and keeps the build green.

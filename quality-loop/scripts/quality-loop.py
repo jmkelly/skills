@@ -50,12 +50,14 @@ Audits are deterministic — same source, tool version, and config ⇒ same
 result; pin tool versions (see SKILL.md Notes). A skipped audit
 (--skip) counts as passing for prerequisite ordering.
 
-Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--harness pi|opencode]
+Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--harness auto|pi|opencode]
 
   --dry-run   run the audit phase and print the implementor brief without
               launching an implementor session (no fixes are made)
-  --harness   which agent harness launches the implementor passes: `pi`
-              (default, `pi -p` with a per-run session dir) or `opencode`
+  --harness   which agent harness launches the implementor passes: `auto`
+              (default: the harness that launched the loop via its AI_AGENT
+              process marker, then whichever of pi/opencode is on PATH, pi
+              first), `pi` (`pi -p` with a per-run session dir) or `opencode`
               (`opencode run --title quality-implementor`, fresh session per
               pass; the handoff file carries context between passes either way)
 
@@ -67,7 +69,8 @@ skill at ~/.pi/agent/skills/quality-loop and the opencode skill at
 ~/.config/opencode/skills/quality-loop are the same source tree.
 
 Environment (QUALITY_* names):
-  QUALITY_HARNESS     implementor harness: pi|opencode (default: pi; --harness wins)
+  QUALITY_HARNESS     implementor harness: auto|pi|opencode (default: auto; --harness wins).
+                      auto = the invoking harness (AI_AGENT marker), then PATH (pi first)
   QUALITY_MODEL       model for the implementor call (default: harness default)
   QUALITY_AGENT       opencode agent for the implementor call (--agent; pi ignores it)
   QUALITY_SESSION_DIR implementor session dir (default: per-harness base below)
@@ -80,6 +83,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -172,20 +176,50 @@ class ImplementorConfig:
     model: str
     approve: bool
     auds: dict
-    harness: str = "pi"
+    harness: str | None = "pi"  # None = none found (dry-run only)
     agent: str = ""
 
 
-HARNESSES = ("pi", "opencode")
+HARNESSES = ("pi", "opencode")  # probe order for --harness auto, pi first
 
 
-def resolve_harness(cli_value: str | None) -> str:
+def harness_from_marker() -> str | None:
+    """The harness that launched this process, from its process markers.
+
+    Both harnesses export AI_AGENT to child processes (pi sets AI_AGENT=pi,
+    opencode sets AI_AGENT=opencode); OPENCODE / PI_CODING_AGENT are
+    fallbacks for older versions."""
+    marker = os.environ.get("AI_AGENT", "").strip().lower()
+    if marker in HARNESSES:
+        return marker
+    if os.environ.get("OPENCODE"):
+        return "opencode"
+    if os.environ.get("PI_CODING_AGENT") or os.environ.get("PI_SESSION_ID"):
+        return "pi"
+    return None
+
+
+def probe_path_harness() -> str | None:
+    """First harness on PATH; pi preferred (the loop's original harness)."""
+    for name in HARNESSES:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def resolve_harness(cli_value: str | None) -> str | None:
     """Which harness launches implementor passes: explicit --harness wins,
-    then QUALITY_HARNESS, then pi (the historical behavior)."""
-    name = (cli_value or os.environ.get("QUALITY_HARNESS") or "pi").lower()
-    if name not in HARNESSES:
-        raise SystemExit(f"ERROR: unknown harness {name!r} (available: {', '.join(HARNESSES)})")
-    return name
+    then QUALITY_HARNESS, then the invoking harness's process marker, then the
+    first harness on PATH (pi before opencode). None when nothing is found —
+    the dry-run still works; a real implementor pass then fails fast."""
+    cli = (cli_value or "").strip().lower()
+    env = os.environ.get("QUALITY_HARNESS", "").strip().lower()
+    name = cli if cli and cli != "auto" else env
+    if name:
+        if name not in HARNESSES:
+            raise SystemExit(f"ERROR: unknown harness {name!r} (available: {', '.join(HARNESSES)})")
+        return name
+    return harness_from_marker() or probe_path_harness()
 
 
 def dotnet_marker(repo: Path) -> bool:
@@ -313,7 +347,7 @@ def default_session_base(harness: str) -> Path:
     return Path.home() / ".pi" / "sessions" / "quality-implementor"
 
 
-def session_dir_from_env(harness: str = "pi") -> Path:
+def session_dir_from_env(harness: str | None = "pi") -> Path:
     """Implementor session dir.
 
     QUALITY_SESSION_DIR, when set, is the exact dir (escape hatch for CI and
@@ -396,10 +430,19 @@ def build_opencode_command(config: ImplementorConfig, brief: str) -> list[str]:
     return cmd
 
 
+def no_harness_error() -> str:
+    return (
+        "ERROR: no implementor harness found — install `pi` or `opencode` on PATH,\n"
+        "       pass --harness pi|opencode, or set QUALITY_HARNESS."
+    )
+
+
 def build_harness_command(config: ImplementorConfig, brief: str) -> list[str]:
     if config.harness == "opencode":
         return build_opencode_command(config, brief)
-    return build_pi_command(config, brief)
+    if config.harness == "pi":
+        return build_pi_command(config, brief)
+    raise SystemExit(no_harness_error())
 
 
 def run_pi(cmd: list[str]) -> None:
@@ -498,6 +541,7 @@ Stop when done. The loop script re-runs all audits automatically and will come b
 def run_implementor(config: ImplementorConfig, failed: list[str], dry_run: bool = False) -> None:
     brief = build_brief(config, failed)
     if dry_run:
+        print(f"    [dry-run] implementor harness: {config.harness or 'none found'}")
         print_dry_run(brief)
         return
     launch(config, build_harness_command(config, brief))
@@ -624,7 +668,7 @@ def run_loop(enabled: list[str], config: ImplementorConfig, args: argparse.Names
 
 
 def build_config(args: argparse.Namespace, stack: str, auds: dict) -> ImplementorConfig:
-    harness = resolve_harness(getattr(args, "harness", None))
+    harness = resolve_harness(getattr(args, "harness", "auto"))
     approve = os.environ.get("QUALITY_APPROVE", os.environ.get("QUALITY_PI_APPROVE", "1")) != "0"
     return ImplementorConfig(
         stack=stack,
@@ -646,8 +690,9 @@ def parse_args() -> argparse.Namespace:
         "--skip", action="append", default=[], help="skip an audit (can be repeated): quality|coverage|metrics|warnings[|stryker]"
     )
     parser.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip implementor")
-    parser.add_argument("--harness", choices=["pi", "opencode"], default=None,
-                        help="implementor harness (default: QUALITY_HARNESS or pi)")
+    parser.add_argument("--harness", choices=["auto", *HARNESSES], default="auto",
+                        help="implementor harness: auto detects the invoking harness "
+                             "(AI_AGENT), then PATH (pi first); default: auto")
     return parser.parse_args()
 
 
@@ -662,6 +707,7 @@ def main() -> int:
 
     print(f"Detected stack: {stack} ({', '.join(enabled)} audits enabled; "
           f"repo {REPO})")
+    print(f"Implementor harness: {config.harness or 'none found (audit/dry-run only; set --harness or QUALITY_HARNESS)'}")
     return run_loop(enabled, config, args)
 
 

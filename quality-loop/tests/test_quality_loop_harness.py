@@ -1,8 +1,9 @@
 """Tests for scripts/quality-loop.py — harness support (pi | opencode).
 
-Covers harness resolution (CLI flag > QUALITY_HARNESS > default pi),
-per-harness session-dir bases, the `opencode run` command construction /
-launch path, and the harness-aware exhaustion report.
+Covers harness resolution (CLI flag > QUALITY_HARNESS > process marker >
+PATH probe, with `auto` the default), per-harness session-dir bases, the
+`opencode run` command construction / launch path, and the harness-aware
+exhaustion report.
 """
 from __future__ import annotations
 
@@ -23,11 +24,49 @@ def make_config(tmp_path: Path, **kw) -> ql.ImplementorConfig:
     return ql.ImplementorConfig(**defaults)
 
 
+MARKERS = ("AI_AGENT", "OPENCODE", "PI_CODING_AGENT", "PI_SESSION_ID")
+
+
+def clean_env(monkeypatch, probe=None):
+    """No harness hints in the environment; PATH probe stubbed."""
+    monkeypatch.delenv("QUALITY_HARNESS", raising=False)
+    for name in MARKERS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ql, "probe_path_harness", lambda: probe)
+
+
 # ------------------------------------------------------- harness resolution
 
-def test_resolve_harness_default_is_pi(monkeypatch):
-    monkeypatch.delenv("QUALITY_HARNESS", raising=False)
+def test_resolve_harness_auto_probes_path(monkeypatch):
+    clean_env(monkeypatch, probe="pi")
     assert ql.resolve_harness(None) == "pi"
+    assert ql.resolve_harness("auto") == "pi"
+
+
+def test_resolve_harness_auto_nothing_found(monkeypatch):
+    clean_env(monkeypatch, probe=None)
+    assert ql.resolve_harness(None) is None
+
+
+def test_resolve_harness_auto_prefers_invoking_marker(monkeypatch):
+    clean_env(monkeypatch, probe="pi")  # PATH would say pi...
+    monkeypatch.setenv("AI_AGENT", "opencode")
+    assert ql.resolve_harness("auto") == "opencode"  # ...the marker wins
+
+
+def test_resolve_harness_marker_fallbacks(monkeypatch):
+    clean_env(monkeypatch, probe=None)
+    monkeypatch.setenv("OPENCODE", "1")
+    assert ql.resolve_harness("auto") == "opencode"
+    monkeypatch.delenv("OPENCODE")
+    monkeypatch.setenv("PI_CODING_AGENT", "true")
+    assert ql.resolve_harness("auto") == "pi"
+
+
+def test_resolve_harness_unknown_marker_falls_through_to_probe(monkeypatch):
+    clean_env(monkeypatch, probe="opencode")
+    monkeypatch.setenv("AI_AGENT", "cursor")
+    assert ql.resolve_harness("auto") == "opencode"
 
 
 def test_resolve_harness_from_env(monkeypatch):
@@ -35,9 +74,22 @@ def test_resolve_harness_from_env(monkeypatch):
     assert ql.resolve_harness(None) == "opencode"
 
 
+def test_resolve_harness_env_beats_marker(monkeypatch):
+    clean_env(monkeypatch, probe="pi")
+    monkeypatch.setenv("AI_AGENT", "pi")
+    monkeypatch.setenv("QUALITY_HARNESS", "opencode")
+    assert ql.resolve_harness("auto") == "opencode"
+
+
 def test_resolve_harness_cli_beats_env(monkeypatch):
     monkeypatch.setenv("QUALITY_HARNESS", "opencode")
     assert ql.resolve_harness("pi") == "pi"
+
+
+def test_resolve_harness_cli_beats_marker(monkeypatch):
+    clean_env(monkeypatch, probe=None)
+    monkeypatch.setenv("AI_AGENT", "pi")
+    assert ql.resolve_harness("opencode") == "opencode"
 
 
 def test_resolve_harness_case_insensitive(monkeypatch):
@@ -55,6 +107,23 @@ def test_resolve_harness_unknown_env_raises(monkeypatch):
     monkeypatch.setenv("QUALITY_HARNESS", "cursor")
     with pytest.raises(SystemExit, match="unknown harness"):
         ql.resolve_harness(None)
+
+
+# ------------------------------------------------------------- path probe
+
+def test_probe_path_harness_prefers_pi(monkeypatch):
+    monkeypatch.setattr(ql.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert ql.probe_path_harness() == "pi"
+
+
+def test_probe_path_harness_falls_back_to_opencode(monkeypatch):
+    monkeypatch.setattr(ql.shutil, "which", lambda name: "/usr/bin/opencode" if name == "opencode" else None)
+    assert ql.probe_path_harness() == "opencode"
+
+
+def test_probe_path_harness_none(monkeypatch):
+    monkeypatch.setattr(ql.shutil, "which", lambda name: None)
+    assert ql.probe_path_harness() is None
 
 
 # ------------------------------------------------------------- session dirs
@@ -112,6 +181,11 @@ def test_build_harness_command_dispatches(tmp_path):
     assert ql.build_harness_command(oc_config, "b")[:2] == ["opencode", "run"]
 
 
+def test_build_harness_command_unresolved(tmp_path):
+    with pytest.raises(SystemExit, match="no implementor harness found"):
+        ql.build_harness_command(make_config(tmp_path, harness=None), "b")
+
+
 def test_run_opencode(monkeypatch):
     calls = []
     monkeypatch.setattr(ql.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or fake_proc())
@@ -157,6 +231,12 @@ def test_run_implementor_launches_opencode(tmp_path, monkeypatch):
     assert launched[0][:2] == ["opencode", "run"]
 
 
+def test_run_implementor_dry_run_reports_harness(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ql, "print_dry_run", lambda brief: None)
+    ql.run_implementor(make_config(tmp_path, harness="opencode"), ["quality"], dry_run=True)
+    assert "implementor harness: opencode" in capsys.readouterr().out
+
+
 def test_print_exhausted_opencode(tmp_path, capsys):
     ql.print_exhausted(["quality"], ql.build_audits("python"), tmp_path, 3, harness="opencode")
     out = capsys.readouterr().out
@@ -189,10 +269,10 @@ def test_build_config_harness_and_agent(monkeypatch, tmp_path):
     assert config.session_dir == tmp_path / "s"
 
 
-def test_build_config_harness_defaults_without_flag(monkeypatch):
-    monkeypatch.delenv("QUALITY_HARNESS", raising=False)
+def test_build_config_harness_detects_without_flag(monkeypatch):
+    clean_env(monkeypatch, probe="pi")
     monkeypatch.delenv("QUALITY_AGENT", raising=False)
-    # Namespace without a harness attr (old callers) still builds a pi config.
+    # Namespace without a harness attr (old callers) still auto-detects.
     config = ql.build_config(Namespace(batch_size=1), "dotnet", {})
     assert config.harness == "pi"
     assert config.agent == ""
@@ -211,6 +291,6 @@ def test_parse_args_harness_flag(monkeypatch):
     assert ql.parse_args().harness == "opencode"
 
 
-def test_parse_args_harness_defaults_none(monkeypatch):
+def test_parse_args_harness_defaults_auto(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["quality-loop.py"])
-    assert ql.parse_args().harness is None
+    assert ql.parse_args().harness == "auto"
