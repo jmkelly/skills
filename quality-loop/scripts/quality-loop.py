@@ -50,10 +50,20 @@ Audits are deterministic — same source, tool version, and config ⇒ same
 result; pin tool versions (see SKILL.md Notes). A skipped audit
 (--skip) counts as passing for prerequisite ordering.
 
-Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--harness auto|pi|opencode]
+Usage: quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--report] [--harness auto|pi|opencode]
 
   --dry-run   run the audit phase and print the implementor brief without
               launching an implementor session (no fixes are made)
+  --report    run the audit phase once, fresh (never reusing stale queue or
+              report files), then write quality-report.md (brief implementor
+              report: gate status, ticket DAG, top offenders) and
+              quality-plan.json (a `bd create --graph` plan: one ticket per
+              file x gate, chunked at batch-size, same-file tickets chained,
+              one verification ticket fanning in on all of them). Nothing is
+              launched and no beads database is touched — import the plan with
+              `bd create --graph quality-plan.json`. batch-size caps offenders
+              per ticket; max-iterations is ignored. Exit 0 = every enabled
+              gate green (no tickets), 1 = work remains (report written).
   --harness   which agent harness launches the implementor passes: `auto`
               (default: the harness that launched the loop via its AI_AGENT
               process marker, then whichever of pi/opencode is on PATH, pi
@@ -86,9 +96,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+try:  # pytest: imported as scripts.quality_loop (repo root on sys.path)
+    from scripts.quality_report import AuditRun, ReportResult, write_report_and_plan
+except ImportError:  # standalone: python3 scripts/quality-loop.py (script dir on sys.path)
+    from quality_report import AuditRun, ReportResult, write_report_and_plan
 
 
 def git_root(start: Path) -> Path | None:
@@ -667,6 +683,65 @@ def run_loop(enabled: list[str], config: ImplementorConfig, args: argparse.Names
     return exit_after(list(results), enabled, config, args.max_iterations)
 
 
+# -------------------------------------------------------------- report mode
+
+def run_report_audits(enabled: list[str], auds: dict) -> list[AuditRun]:
+    """One fresh audit pass, recording each gate's status and start time.
+
+    Same prerequisite ordering as the fix loop (cheap gates first; Stryker
+    only once quality/metrics/warnings pass) — a gate skipped this way is
+    reported as skipped and its stale queue is never used for tickets."""
+    runs: list[AuditRun] = []
+    failed: list[str] = []
+    for name in enabled:
+        script, queue, desc, prereqs = auds[name]
+        blockers = blocking_prereqs(prereqs, failed)
+        if blockers:
+            print(f"  skipping {name}: prerequisite gate failed ({', '.join(blockers)})")
+            runs.append(AuditRun(name, "skipped", None, f"prerequisite gate failed: {', '.join(blockers)}"))
+            continue
+        print(f"  running {name}: {script.name}")
+        started = time.time()
+        result = subprocess.run([sys.executable, str(script)], cwd=REPO)
+        passed = result.returncode == 0
+        runs.append(AuditRun(name, "passed" if passed else "failed", started, f"exit {result.returncode}"))
+        if passed:
+            print(f"    {name}: PASS")
+        else:
+            failed.append(name)
+            print(f"    {name}: FAIL (gate: {desc}) -> see {queue}")
+    return runs
+
+
+def print_report_result(result: ReportResult) -> None:
+    n = len(result.tickets)
+    if not n:
+        print("\n==> ALL ENABLED GATES PASSED (fresh) — nothing to ticket")
+        for note in result.notes:
+            print(f"    NOTE: {note}")
+        print(f"    report: {result.report_path}")
+        return
+    print(f"\n==> quality-report.md: {n} ticket(s) (+1 verification) across "
+          f"{len(result.waves)} wave(s); {len(result.waves[0]) if result.waves else 0} ready now")
+    for note in result.notes:
+        print(f"    NOTE: {note}")
+    if result.plan_path is not None:
+        print(f"    plan:   {result.plan_path}")
+        print(f"    import: bd create --graph {result.plan_path.name}")
+
+
+def run_report_mode(enabled: list[str], config: ImplementorConfig) -> int:
+    """Fresh audits -> implementor report + bd graph plan. Exit 0/1 = green/red."""
+    print("\n" + "=" * 64)
+    print("REPORT MODE — fresh audit pass, then quality-report.md + quality-plan.json")
+    print("=" * 64)
+    runs = run_report_audits(enabled, config.auds)
+    result = write_report_and_plan(REPO, config.stack, config.auds, enabled, runs,
+                                   config.batch, LOOP_DIR)
+    print_report_result(result)
+    return 1 if result.failed else 0
+
+
 def build_config(args: argparse.Namespace, stack: str, auds: dict) -> ImplementorConfig:
     harness = resolve_harness(getattr(args, "harness", "auto"))
     approve = os.environ.get("QUALITY_APPROVE", os.environ.get("QUALITY_PI_APPROVE", "1")) != "0"
@@ -689,7 +764,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip", action="append", default=[], help="skip an audit (can be repeated): quality|coverage|metrics|warnings[|stryker]"
     )
-    parser.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip implementor")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="audit phase only; print brief, skip implementor")
+    mode.add_argument("--report", action="store_true",
+                      help="fresh audit phase only; write quality-report.md + quality-plan.json "
+                           "(bd graph plan of DAG tickets) for a future implementor")
     parser.add_argument("--harness", choices=["auto", *HARNESSES], default="auto",
                         help="implementor harness: auto detects the invoking harness "
                              "(AI_AGENT), then PATH (pi first); default: auto")
@@ -703,10 +782,12 @@ def main() -> int:
     validate_skips(args.skip, auds, stack)
     enabled = require_enabled(enabled_audits(args.skip, auds))
     config = build_config(args, stack, auds)
-    config.session_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Detected stack: {stack} ({', '.join(enabled)} audits enabled; "
           f"repo {REPO})")
+    if args.report:
+        return run_report_mode(enabled, config)
+    config.session_dir.mkdir(parents=True, exist_ok=True)
     print(f"Implementor harness: {config.harness or 'none found (audit/dry-run only; set --harness or QUALITY_HARNESS)'}")
     return run_loop(enabled, config, args)
 

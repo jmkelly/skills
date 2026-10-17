@@ -10,7 +10,10 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import QUALITY_LOOP as ql
+from tests.conftest import QUALITY_REPORT as qr
 from tests.conftest import fake_proc
 
 
@@ -246,6 +249,7 @@ def test_parse_args_defaults(monkeypatch):
     assert args.batch_size == 5
     assert args.skip == []
     assert not args.dry_run
+    assert not args.report
 
 
 def test_parse_args_positional_and_flags(monkeypatch):
@@ -255,6 +259,19 @@ def test_parse_args_positional_and_flags(monkeypatch):
     assert args.batch_size == 7
     assert args.skip == ["metrics"]
     assert args.dry_run
+    assert not args.report
+
+
+def test_parse_args_report_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["quality-loop.py", "5", "--report"])
+    args = ql.parse_args()
+    assert args.report and not args.dry_run
+
+
+def test_parse_args_report_conflicts_with_dry_run(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["quality-loop.py", "--report", "--dry-run"])
+    with pytest.raises(SystemExit):
+        ql.parse_args()
 
 
 def test_main_runs_loop(monkeypatch, tmp_path, capsys):
@@ -276,3 +293,101 @@ def test_main_runs_loop(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Detected stack: python (quality audits enabled; repo" in out
     assert "Implementor harness:" in out
+
+
+# ------------------------------------------------------------- report mode
+
+def test_run_report_audits_records_statuses(monkeypatch, capsys):
+    codes = {"a.py": 0, "b.py": 1}
+
+    def fake_run(cmd, **kw):
+        return fake_proc(codes[Path(cmd[-1]).name])
+
+    monkeypatch.setattr(ql.subprocess, "run", fake_run)
+    auds = {"quality": (Path("a.py"), "crap-queue.md", "d", ()),
+            "metrics": (Path("b.py"), "metrics-queue.md", "d", ())}
+    runs = ql.run_report_audits(["quality", "metrics"], auds)
+    assert [(r.name, r.status, r.detail) for r in runs] == [
+        ("quality", "passed", "exit 0"), ("metrics", "failed", "exit 1")]
+    assert all(r.started is not None for r in runs)
+    out = capsys.readouterr().out
+    assert "quality: PASS" in out
+    assert "metrics: FAIL (gate: d) -> see metrics-queue.md" in out
+
+
+def test_run_report_audits_skips_blocked_prereq(monkeypatch, capsys):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(Path(cmd[-1]).name)
+        return fake_proc(1)  # quality fails, so the stryker prereq blocks
+
+    monkeypatch.setattr(ql.subprocess, "run", fake_run)
+    auds = {"quality": (Path("a.py"), "q.md", "d", ()),
+            "stryker": (Path("s.py"), "s.md", "d", ("quality",))}
+    runs = ql.run_report_audits(["quality", "stryker"], auds)
+    assert [(r.name, r.status) for r in runs] == [("quality", "failed"), ("stryker", "skipped")]
+    assert runs[1].started is None and "prerequisite gate failed: quality" in runs[1].detail
+    assert calls == ["a.py"]
+    assert "skipping stryker: prerequisite gate failed (quality)" in capsys.readouterr().out
+
+
+def test_print_report_result_red(tmp_path, capsys):
+    ticket = qr.Ticket(key="t1", title="x", type="task", priority=1, gate="quality", file="a.py")
+    result = qr.ReportResult(report_path=tmp_path / "quality-report.md",
+                             plan_path=tmp_path / "quality-plan.json",
+                             tickets=[ticket], verify=None, failed=["quality"],
+                             notes=["quality: no crap-report.json"],
+                             waves=[[ticket]])
+    ql.print_report_result(result)
+    out = capsys.readouterr().out
+    assert "1 ticket(s) (+1 verification) across 1 wave(s); 1 ready now" in out
+    assert "NOTE: quality: no crap-report.json" in out
+    assert "import: bd create --graph quality-plan.json" in out
+
+
+def test_print_report_result_clean(tmp_path, capsys):
+    result = qr.ReportResult(report_path=tmp_path / "quality-report.md", plan_path=None,
+                             tickets=[], verify=None, failed=[], notes=[], waves=[])
+    ql.print_report_result(result)
+    out = capsys.readouterr().out
+    assert "ALL ENABLED GATES PASSED (fresh) — nothing to ticket" in out
+    assert str(result.report_path) in out
+
+
+def test_run_report_mode_red(tmp_path, monkeypatch, capsys):
+    ticket = qr.Ticket(key="t1", title="x", type="task", priority=1, gate="quality", file="a.py")
+    result = qr.ReportResult(report_path=tmp_path / "quality-report.md",
+                             plan_path=tmp_path / "quality-plan.json",
+                             tickets=[ticket], verify=None, failed=["quality"], notes=[], waves=[[ticket]])
+    monkeypatch.setattr(ql, "run_report_audits",
+                        lambda enabled, auds: [qr.AuditRun("quality", "failed", 1.0, "exit 1")])
+    monkeypatch.setattr(ql, "write_report_and_plan", lambda *a, **k: result)
+    assert ql.run_report_mode(["quality"], make_config(tmp_path)) == 1
+    assert "REPORT MODE" in capsys.readouterr().out
+
+
+def test_run_report_mode_green(tmp_path, monkeypatch, capsys):
+    result = qr.ReportResult(report_path=tmp_path / "quality-report.md", plan_path=None,
+                             tickets=[], verify=None, failed=[], notes=[], waves=[])
+    monkeypatch.setattr(ql, "run_report_audits",
+                        lambda enabled, auds: [qr.AuditRun("quality", "passed", 1.0, "exit 0")])
+    monkeypatch.setattr(ql, "write_report_and_plan", lambda *a, **k: result)
+    assert ql.run_report_mode(["quality"], make_config(tmp_path)) == 0
+    assert "ALL ENABLED GATES PASSED" in capsys.readouterr().out
+
+
+def test_main_report_mode_skips_session_dir(monkeypatch, tmp_path, capsys):
+    seen = []
+    monkeypatch.setattr(ql, "detect_stack", lambda repo: "python")
+    monkeypatch.setattr(ql, "build_audits",
+                        lambda stack: {"quality": (Path("a.py"), "crap-queue.md", "d", ())})
+    monkeypatch.setattr(ql, "validate_skips", lambda skip, auds, stack: None)
+    monkeypatch.setattr(ql, "run_report_mode", lambda enabled, config: seen.append(enabled) or 7)
+    monkeypatch.setenv("QUALITY_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setattr(sys, "argv", ["quality-loop.py", "--report"])
+    assert ql.main() == 7
+    assert seen == [["quality"]]
+    assert not (tmp_path / "sessions").exists()
+    out = capsys.readouterr().out
+    assert "Implementor harness:" not in out

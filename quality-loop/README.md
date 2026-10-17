@@ -172,10 +172,10 @@ harnesses (same tree, so fixes land everywhere at once):
   reads `SKILL.md`, runs the audits for the detected stack, and drives the
   fixes. Or ask for a single audit: *"run the CRAP audit"*.
 - **Automated loop**: `scripts/quality-loop.py [max-iterations] [batch-size]
-  [--skip <audit> ...] [--dry-run] [--harness auto|pi|opencode]` — headless
-  implementor passes via `pi -p` (fresh session per pass, unique session dir
-  per run, one-paragraph handoff between passes) or `opencode run --title
-  quality-implementor` (fresh session per pass, handoff under
+  [--skip <audit> ...] [--dry-run] [--report] [--harness auto|pi|opencode]` —
+  headless implementor passes via `pi -p` (fresh session per pass, unique
+  session dir per run, one-paragraph handoff between passes) or `opencode run
+  --title quality-implementor` (fresh session per pass, handoff under
   `~/.local/share/opencode/sessions/quality-implementor/`). `--harness auto`
   (the default) follows the harness that launched the loop via its `AI_AGENT`
   process marker, then the first of `pi`/`opencode` on `PATH`. `--dry-run`
@@ -184,6 +184,17 @@ harnesses (same tree, so fixes land everywhere at once):
   `QUALITY_AGENT` (opencode `--agent`), `QUALITY_SESSION_DIR`,
   `QUALITY_APPROVE=0` (`QUALITY_PI_APPROVE=0` is the legacy pi-specific
   spelling).
+- **Report mode**: `scripts/quality-loop.py --report` runs one fresh audit pass
+  (stale queues are never read) and writes `quality-report.md` plus
+  `quality-plan.json` — a `bd create --graph` DAG of tickets for a future
+  implementor: one ticket per (file, gate) with worst-first chunks capped at
+  `batch-size`, same-file tickets chained so parallel workers never share a
+  file, and one verification ticket fanning in on the whole set. Every ticket
+  carries its offenders, fix approach, file ownership, anti-gaming contract,
+  and an acceptance criterion naming the exact audit command. Import with
+  `bd create --graph quality-plan.json`, work `bd ready --exclude-type epic`,
+  and let the verification ticket prove all gates green. Exit 0 = green (no
+  tickets), 1 = work remains.
 - **Manual two-agent pass**: the verifier (never edits code) runs every audit,
   diagnoses each offender near `file:line`, and records fix recommendations in
   the queues; the implementor fixes worst-first and keeps the build green.
@@ -203,8 +214,9 @@ pip install -e .[dev]   # pytest
 pytest
 ```
 
-310 tests cover the audits' discovery, analysis, report schemas, and the loop
-driver's stack detection and iteration logic.
+430 tests cover the audits' discovery, analysis, report schemas, the loop
+driver's stack detection and iteration logic, and report mode's ticket DAG
+(readers, scoping, plan shape, waves, staleness handling).
 
 ## License
 

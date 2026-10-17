@@ -7,6 +7,8 @@ mutates per test project), then:
   - parses each project's newest StrykerOutput/<timestamp>/reports/mutation-report.json
   - writes stryker-queue.md (surviving mutants grouped by test project then
     file, worst-first — the implementor work queue, same shape as crap-queue.md)
+    and stryker-report.json (structured: per-project score/thresholds/passed +
+    surviving mutants by file; the quality report's ticket input)
   - exit 0 = pass; exit 1 = any project's mutation score below its thresholds.break
 
 The test project's own `stryker-config.json` is used when present (repo policy:
@@ -69,6 +71,7 @@ def find_repo() -> Path:
 
 REPO = find_repo()
 QUEUE = REPO / "stryker-queue.md"
+REPORT = REPO / "stryker-report.json"
 
 
 def test_projects(repo: Path) -> list[Path]:
@@ -200,6 +203,55 @@ def queue_md(results: list[tuple[str, dict, float | None, dict]]) -> str:
     return "\n".join(lines)
 
 
+def project_report(name: str, data: dict, score: float | None, thresholds: dict) -> dict:
+    """One project's structured result: score, gate, and surviving mutants by file."""
+    files: dict[str, list[dict]] = {}
+    for path, info in data.get("files", {}).items():
+        mutants = [m for m in info.get("mutants", []) if m.get("status") == "Survived"]
+        if mutants:
+            files[path] = [
+                {
+                    "line": m["location"]["start"]["line"],
+                    "mutator": m.get("mutatorName", ""),
+                    "replacement": m.get("replacement", ""),
+                }
+                for m in sorted(mutants, key=lambda m: m["location"]["start"]["line"])
+            ]
+    killed, survived, timeout, no_coverage = mutant_counts(data)
+    return {
+        "name": name,
+        "score": score,
+        "thresholds": thresholds,
+        "passed": score is None or score >= float(thresholds.get("break", 0)),
+        "killed": killed,
+        "survived": survived,
+        "timeout": timeout,
+        "noCoverage": no_coverage,
+        "files": files,
+    }
+
+
+def report_json(results: list[tuple[str, dict, float | None, dict]], skipped: list[str]) -> dict:
+    """Structured companion to stryker-queue.md (the quality report's input)."""
+    projects = [project_report(*result) for result in results]
+    return {
+        "tool": TOOL,
+        "projects": projects,
+        "skipped": skipped,
+        "summary": {
+            "projects": len(projects),
+            "failing": sum(1 for project in projects if not project["passed"]),
+            "survivors": sum(len(mutants) for project in projects
+                             for mutants in project["files"].values()),
+        },
+    }
+
+
+def write_artifacts(results: list[tuple[str, dict, float | None, dict]], skipped: list[str]) -> None:
+    REPORT.write_text(json.dumps(report_json(results, skipped), indent=2) + "\n", encoding="utf-8")
+    QUEUE.write_text(queue_md(results), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-gate", action="store_true", help="always exit 0")
@@ -265,7 +317,7 @@ def main() -> int:
             data = json.loads(report.read_text(encoding="utf-8"))
             results.append((test_project.stem, data, mutation_score(data), thresholds))
 
-    QUEUE.write_text(queue_md(results))
+    write_artifacts(results, skipped)
 
     failing = [name for name, _, score, thresholds in results
                if score is not None and score < float(thresholds.get("break", 0))]

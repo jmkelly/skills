@@ -1,6 +1,6 @@
 ---
 name: quality-loop
-description: Run the quality loop for the current repo (detects the stack, .NET or Python; drives implementor passes via pi or opencode). Use when asked to run the quality loop or an audit, when crap-queue.md / metrics-queue.md / stryker-queue.md report offenders, when the gates or their tooling are mentioned (CRAP < 10, crap4dotnet, radon, Stryker, code-metrics), or when acting as verifier or implementor in the loop.
+description: Run the quality loop for the current repo (detects the stack, .NET or Python; drives implementor passes via pi or opencode, or writes a fresh quality report with bd DAG tickets via --report). Use when asked to run the quality loop or an audit, for a quality report / implementation tickets, when crap-queue.md / metrics-queue.md / stryker-queue.md report offenders, when the gates or their tooling are mentioned (CRAP < 10, crap4dotnet, radon, Stryker, code-metrics), or when acting as verifier or implementor in the loop.
 ---
 
 # Quality Loop
@@ -34,7 +34,7 @@ this skill); the loop driver simply doesn't offer `--skip stryker` for Python re
 ## Automated loop — `scripts/quality-loop.py`
 
 ```bash
-python3 scripts/quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--harness auto|pi|opencode]
+python3 scripts/quality-loop.py [max-iterations] [batch-size] [--skip <audit> ...] [--dry-run] [--report] [--harness auto|pi|opencode]
 ```
 
 - Runs the detected stack's quality, coverage, metrics, and warnings every iteration (cheap gates
@@ -58,11 +58,48 @@ python3 scripts/quality-loop.py [max-iterations] [batch-size] [--skip <audit> ..
   fails fast with a fix-it message.
 - `--dry-run` — audit phase only; prints the resolved harness and the implementor
   brief without launching it.
+- `--report` — audit phase only, once and fresh; writes the implementor report and
+  a `bd create --graph` plan of DAG tickets instead of launching anyone (see
+  "Report mode" below).
 - Environment overrides: `QUALITY_HARNESS` (`auto`|`pi`|`opencode`; overrides
   auto-detection), `QUALITY_MODEL` (implementor model), `QUALITY_AGENT`
   (opencode `--agent`; ignored by pi), `QUALITY_SESSION_DIR` (exact session dir;
   default as above), `QUALITY_APPROVE=0` (skip approval: pi `-a` / opencode
   `--auto`; `QUALITY_PI_APPROVE=0` is the legacy pi-specific spelling).
+
+### Report mode — `--report` (implementor brief + bd DAG tickets)
+
+One fresh audit pass (same cheap-first order and Stryker prerequisite as the
+loop), then two artifacts in the repo root:
+
+| Artifact | What it is |
+|---|---|
+| `quality-report.md` | Implementor brief: per-gate status, the ticket DAG by parallel wave, top offenders, worker and anti-gaming rules. |
+| `quality-plan.json` | A `bd create --graph` plan: one ticket per (file, gate), worst-first chunks capped at `batch-size` offenders, same-file tickets chained, one verification ticket fanning in on all work tickets. |
+
+Ticket scoping follows beads conventions (small, verifiable, explicit
+blocked-by edges) and pstack's parallel-work guidance: a ticket owns one file,
+so different files are independent workers (wave 1 is every file's worst gate
+chunk, ready at once) while same-file tickets are chained — two workers never
+edit one file. Every ticket ships its offenders (`file:line` + metric), the fix
+approach, the file-ownership rule, the anti-gaming contract, and an acceptance
+criterion with the exact audit command that proves it. The verification ticket
+re-runs `--report` and only becomes ready when the whole queue is closed.
+
+```bash
+python3 scripts/quality-loop.py --report          # fresh audits + both artifacts
+bd create --graph quality-plan.json               # import once; re-importing duplicates the set
+bd ready --exclude-type epic                      # claimable work, DAG order enforced
+bd children <epic-id>                             # the whole set
+bd delete <epic-id> --cascade --force             # remove an old set
+```
+
+Exit 0 = every enabled gate green (no tickets; a stale plan file is removed),
+1 = work remains (the report is written either way). A gate whose audit did not
+run (Stryker behind a red cheaper gate) or did not rewrite its JSON artifact
+this run (crash) is reported as such and contributes **no tickets** — the
+report never reads a stale queue. `batch-size` caps offenders per ticket;
+`max-iterations` is ignored.
 
 ## Manual two-agent procedure
 
@@ -144,7 +181,9 @@ merges whatever files are present when they exist and otherwise runs
 - **.NET mutation**: `scripts/dotnet/stryker-audit.py` is likewise skill-local; each
   test project carries its own `stryker-config.json` (project under test,
   thresholds, reporters) — the audit runs every `*.Tests.csproj` in turn and
-  combines the surviving mutants into one queue (gate: every project meets
+  combines the surviving mutants into one queue plus `stryker-report.json`
+  (per-project score/thresholds/passed + survivors by file; the report mode's
+  ticket input) (gate: every project meets
   its own `thresholds.break`). Without a config, the audit generates a default
   pinned to that test project's single ProjectReference (or `--project <csproj>`
   when there is exactly one test project). Generated configs always

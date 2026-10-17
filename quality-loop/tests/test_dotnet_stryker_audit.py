@@ -74,6 +74,7 @@ def patched(tmp_path, monkeypatch) -> Path:
     test_dir = make_projects(tmp_path, refs=("LibA",))
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    monkeypatch.setattr(ds, "REPORT", tmp_path / "stryker-report.json")
     return test_dir
 
 
@@ -83,6 +84,7 @@ def patched_multi(tmp_path, monkeypatch) -> Path:
     test_dir = make_projects(tmp_path, refs=("LibA", "LibB"))
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    monkeypatch.setattr(ds, "REPORT", tmp_path / "stryker-report.json")
     return test_dir
 
 
@@ -93,6 +95,7 @@ def patched_two_projects(tmp_path, monkeypatch) -> tuple[Path, Path]:
     b = make_named_projects(tmp_path, "B.Tests", ("LibB",))
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    monkeypatch.setattr(ds, "REPORT", tmp_path / "stryker-report.json")
     return a, b
 
 
@@ -267,6 +270,7 @@ def test_main_skips_unpinnable_project(tmp_path, monkeypatch):
     make_projects(tmp_path, refs=("LibA", "LibB"))  # no config, two references
     monkeypatch.setattr(ds, "REPO", tmp_path)
     monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    monkeypatch.setattr(ds, "REPORT", tmp_path / "stryker-report.json")
     called: list = []
     monkeypatch.setattr(ds.subprocess, "run",
                         lambda *a, **k: called.append(a) or subprocess.CompletedProcess([], 0))
@@ -283,3 +287,44 @@ def test_below_break_exit_still_writes_queue(patched, monkeypatch):
     write_report(patched, sample_mutation_report(survived=4, killed=1))  # 20% < 25
     assert run_main(monkeypatch) == 1
     assert "## Proj.Tests" in ds.QUEUE.read_text()
+
+
+# ------------------------------------------------------- structured report
+
+def test_report_json_shape(patched, monkeypatch):
+    """The structured companion artifact carries score, gate, and survivors."""
+    fake_subprocess(monkeypatch, {}, returncode=0)
+    write_report(patched, sample_mutation_report(survived=2, killed=3))
+    assert run_main(monkeypatch) == 0
+    data = json.loads(ds.REPORT.read_text())
+    assert data["tool"] == "dotnet-stryker"
+    assert data["summary"] == {"projects": 1, "failing": 0, "survivors": 2}
+    project = data["projects"][0]
+    assert project["name"] == "Proj.Tests"
+    assert project["passed"] is True
+    assert project["killed"] == 3 and project["survived"] == 2
+    assert project["thresholds"]["break"] == 25
+    assert list(project["files"]) == ["/repo/Proj.Lib/Program.cs"]
+    assert [m["line"] for m in project["files"]["/repo/Proj.Lib/Program.cs"]] == [7, 7]
+
+
+def test_report_json_marks_below_break_failing(patched, monkeypatch):
+    fake_subprocess(monkeypatch, {}, returncode=2)
+    write_report(patched, sample_mutation_report(survived=4, killed=1))  # 20% < 25
+    assert run_main(monkeypatch) == 1
+    project = json.loads(ds.REPORT.read_text())["projects"][0]
+    assert project["passed"] is False
+    assert project["score"] == 20.0
+
+
+def test_report_json_with_no_results(tmp_path, monkeypatch):
+    """Every project skipped: an empty but valid report is still written."""
+    make_projects(tmp_path, refs=("LibA", "LibB"))
+    monkeypatch.setattr(ds, "REPO", tmp_path)
+    monkeypatch.setattr(ds, "QUEUE", tmp_path / "stryker-queue.md")
+    monkeypatch.setattr(ds, "REPORT", tmp_path / "stryker-report.json")
+    monkeypatch.setattr(ds.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess([], 0))
+    assert run_main(monkeypatch) == 0
+    data = json.loads(ds.REPORT.read_text())
+    assert data["projects"] == [] and data["summary"]["projects"] == 0

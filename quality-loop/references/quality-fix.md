@@ -9,6 +9,10 @@ green (every queue empty), honestly and without regressions.
 - `crap-queue.md` / `metrics-queue.md` / `warnings-queue.md` / `stryker-queue.md` — offenders, worst first, with `file:line`
 - `crap-report.json` / `metrics-report.json` / `warnings-report.json` / `StrykerOutput/<latest>/reports/mutation-report.json` — full data behind the queues
 - `AGENTS.md` — project conventions (DDD, thin controllers/pages, service extraction)
+- (report mode) `quality-report.md` + `quality-plan.json` — the ticket DAG; when the
+  plan was imported into beads, work one `bd ready --exclude-type epic` ticket at a
+  time, edit only that ticket's file, and paste the acceptance evidence into the
+  ticket before closing it
 
 Work worst-first **across all failing queues** (quality, then metrics, then warnings,
 then stryker); the verifier does not send you away until every audit has run.

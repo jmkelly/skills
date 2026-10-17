@@ -5,6 +5,13 @@ tooling, investigate the offenders, and produce an actionable report for the
 implementor. **You never edit code** — the report is your only output; the implementor
 does the editing.
 
+The automated version of this role is `python3 scripts/quality-loop.py --report`: it
+runs every audit fresh (stale artifacts are ignored), writes `quality-report.md` for
+the implementor, and `quality-plan.json` — a `bd create --graph` DAG of per-file
+tickets with a verification fan-in (see `../SKILL.md` → "Report mode"). Use it when
+the fixes should go to parallel implementors; use the manual procedure below when the
+diagnoses need human/agent judgment the queues can't capture.
+
 ## Procedure
 
 1. Detect the stack if unknown (mapping in `../SKILL.md`, intro). Run **every audit for
