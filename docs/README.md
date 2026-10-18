@@ -23,8 +23,8 @@ Agent skills for the [pi](https://github.com/badlogic/pi) LLM harness and other 
 - [`unslop`](../unslop/SKILL.md) cuts AI tells from any writing, and `automate-me` applies it to the draft.
 - The 24 [`principle-*`](../kelso-mode/SKILL.md) skills hold one leaf per catalog principle, read when that principle applies.
 
-All MIT © Lauren Tan.
+All MIT.
 
 ## License
 
-Per-component MIT, one `LICENSE` per component: © James Kelly for the repo, `kelso-mode`, and `quality-loop`; © Lauren Tan for the bundled leaves; © Matt Pocock for `writing-for-agents`.
+Per-component MIT, one `LICENSE` per component: © James Kelly for the repo, `kelso-mode`, and `quality-loop`; MIT for the bundled leaves; © Matt Pocock for `writing-for-agents`.
